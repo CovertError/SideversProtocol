@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default capabilities for the Sidevers main window. App-defined invoke handlers (generate_master, derive_side, pubkey_from_seed, encode_address, seal_dm, open_dm) are auto-registered by Tauri 2 and don't need explicit allow-* permissions; this file gates the core webview/window primitives only.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default"
+  ]
+}

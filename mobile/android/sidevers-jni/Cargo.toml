@@ -1,0 +1,27 @@
+# Sidevers JNI bridge — exposes the protocol's core operations to Kotlin
+# via JNI-conventional function names. Loaded by Kotlin as a System
+# library; the .so files for each Android ABI are produced by
+# `mobile/build-android.sh` (which uses cargo-ndk).
+#
+# NOT a workspace member — this only matters for mobile builds and
+# `cargo build` from this directory drives it independently.
+
+[package]
+name = "sidevers-jni"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "sidevers_jni"
+crate-type = ["cdylib"]
+
+[lints.rust]
+unsafe_code = "allow"
+
+[dependencies]
+sidevers-core = { path = "../../../crates/sidevers-core" }
+jni = "0.21"
+
+[workspace]
+# Standalone — not part of the main workspace.

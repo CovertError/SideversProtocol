@@ -1,1 +1,4 @@
 /target
+*.profraw
+/proptest-regressions
+.DS_Store

@@ -1,0 +1,36 @@
+[package]
+name = "sidevers-net"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Sidevers network layer: QUIC transport, handshake, session, storage protocol."
+
+[lints]
+workspace = true
+
+[dependencies]
+sidevers-core = { workspace = true }
+sidevers-storage = { workspace = true }
+quinn = { workspace = true }
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
+rcgen = { workspace = true }
+tokio = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+hex = { workspace = true }
+
+# Handshake crypto (shared with sidevers-core's choices).
+x25519-dalek = { workspace = true }
+blake3 = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+subtle = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

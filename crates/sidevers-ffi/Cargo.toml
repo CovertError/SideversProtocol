@@ -1,0 +1,33 @@
+[package]
+name = "sidevers-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "C-ABI bindings for Sidevers — key generation, envelope sign/verify, DM seal/open. For Phase-3 mobile clients."
+
+# The FFI crate forbids unsafe at the workspace level, but we genuinely need
+# `unsafe` for the C ABI (raw pointers, owned-by-foreign-code memory).
+# Override here.
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+
+[lib]
+name = "sidevers"
+# `cdylib` produces .dylib / .so / .dll for runtime linking from Swift/Kotlin.
+# `staticlib` produces .a for static linking into iOS xcframeworks / Android.
+# `rlib` keeps the Rust integration tests compilable.
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+sidevers-core = { workspace = true }
+hex = { workspace = true }
+
+[build-dependencies]
+cbindgen = { workspace = true }

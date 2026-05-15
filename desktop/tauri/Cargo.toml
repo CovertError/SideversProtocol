@@ -1,0 +1,30 @@
+# Sidevers desktop reference client — a Tauri 2 application that wraps a
+# small slice of `sidevers-core` (keygen, address encoding, DM seal/open)
+# behind a vanilla HTML/JS frontend served from ./dist.
+#
+# NOT a workspace member — Tauri pulls in a large dep graph and we don't
+# want it on every `cargo test --workspace`. Build it independently via
+# `desktop/build-desktop.sh` (or `cargo tauri dev` from this directory).
+
+[package]
+name = "sidevers-desktop"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "sidevers-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+sidevers-core = { path = "../../crates/sidevers-core" }
+
+[workspace]
+# Standalone — not part of the main workspace.

@@ -1,0 +1,23 @@
+[package]
+name = "sidevers-conformance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Sidevers conformance test harness. Phase 1 deliverable per spec §10.4."
+
+[lints]
+workspace = true
+
+[dependencies]
+sidevers-core = { workspace = true }
+sidevers-storage = { workspace = true }
+sidevers-net = { workspace = true }
+hex = { workspace = true }
+tokio = { workspace = true }
+tempfile = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+blake3 = { workspace = true }

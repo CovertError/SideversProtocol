@@ -1,0 +1,49 @@
+# Fuzz harness for Sidevers protocol decoders.
+#
+# Runs under nightly Rust + cargo-fuzz + libFuzzer. NOT part of the main
+# workspace (cargo-fuzz manages this as a standalone sub-crate). To run:
+#
+#   cd fuzz
+#   cargo +nightly fuzz run envelope_decode
+#   cargo +nightly fuzz run cbor_decode
+#   cargo +nightly fuzz run direct_message_decode
+#
+# Each target hammers a decoder with arbitrary bytes and asserts the only
+# acceptable outcomes are `Ok` or `Err` — never a panic, never UB.
+
+[package]
+name = "sidevers-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+sidevers-core = { path = "../crates/sidevers-core" }
+
+[[bin]]
+name = "envelope_decode"
+path = "fuzz_targets/envelope_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cbor_decode"
+path = "fuzz_targets/cbor_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "direct_message_decode"
+path = "fuzz_targets/direct_message_decode.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

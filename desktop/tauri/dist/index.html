@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sidevers</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Sidevers</h1>
+      <p class="subtitle">Reference desktop client — keygen, addresses, direct messages.</p>
+    </header>
+
+    <main>
+      <section class="card" aria-labelledby="keys-h">
+        <h2 id="keys-h">1. Keys</h2>
+
+        <div class="row">
+          <button id="gen-master">Generate master seed</button>
+          <input
+            id="master-seed"
+            type="text"
+            spellcheck="false"
+            placeholder="master seed (hex, 32 bytes)"
+          />
+        </div>
+
+        <div class="row">
+          <input
+            id="side-label"
+            type="text"
+            spellcheck="false"
+            placeholder="side label (e.g. &quot;work&quot;)"
+          />
+          <button id="derive-side">Derive side seed</button>
+          <input
+            id="side-seed"
+            type="text"
+            spellcheck="false"
+            placeholder="side seed (hex)"
+          />
+        </div>
+
+        <div class="row">
+          <button id="compute-pubkey">Compute pubkey</button>
+          <input
+            id="pubkey"
+            type="text"
+            spellcheck="false"
+            placeholder="pubkey (hex, 32 bytes)"
+          />
+        </div>
+
+        <div class="row">
+          <button id="encode-side-addr">Encode as side address</button>
+          <button id="encode-verse-addr" class="secondary">Encode as verse address</button>
+          <input id="address" type="text" spellcheck="false" readonly placeholder="bech32m address" />
+        </div>
+      </section>
+
+      <section class="card" aria-labelledby="send-h">
+        <h2 id="send-h">2. Send DM</h2>
+        <input
+          id="send-sender"
+          type="text"
+          spellcheck="false"
+          placeholder="sender side seed (hex)"
+        />
+        <input
+          id="send-recipient"
+          type="text"
+          spellcheck="false"
+          placeholder="recipient pubkey (hex, 32 bytes)"
+        />
+        <textarea id="send-text" placeholder="message text"></textarea>
+        <div class="row">
+          <button id="seal-dm">Seal DM</button>
+          <button id="copy-wire" class="secondary">Copy wire bytes</button>
+        </div>
+        <textarea id="wire" readonly placeholder="wire bytes (hex)"></textarea>
+      </section>
+
+      <section class="card" aria-labelledby="open-h">
+        <h2 id="open-h">3. Open DM</h2>
+        <input
+          id="recv-recipient"
+          type="text"
+          spellcheck="false"
+          placeholder="recipient side seed (hex)"
+        />
+        <textarea id="recv-wire" placeholder="wire bytes (hex)"></textarea>
+        <div class="row">
+          <button id="open-dm">Open DM</button>
+        </div>
+        <textarea id="plaintext" readonly placeholder="plaintext"></textarea>
+      </section>
+
+      <pre id="error" class="error" role="alert"></pre>
+    </main>
+
+    <script src="main.js"></script>
+  </body>
+</html>
