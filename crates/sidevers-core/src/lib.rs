@@ -14,6 +14,7 @@ pub mod envelope;
 pub mod error;
 pub mod features;
 pub mod keys;
+pub mod keystore;
 pub mod linkage;
 pub mod log_id;
 pub mod messages;

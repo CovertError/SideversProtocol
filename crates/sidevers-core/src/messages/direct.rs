@@ -353,6 +353,15 @@ fn read_optional_32(r: &mut CborReader<'_>, field: &'static str) -> Result<Optio
 /// Advance the reader past one CBOR value (skipping its bytes).
 /// Supports the major types we use; sufficient for capturing a `Reference`.
 fn skip_value(r: &mut CborReader<'_>) -> Result<()> {
+    skip_value_inner(r, crate::cbor::MAX_CBOR_SKIP_DEPTH)
+}
+
+fn skip_value_inner(r: &mut CborReader<'_>, depth: u8) -> Result<()> {
+    if depth == 0 {
+        return Err(Error::CborDecode(
+            "skip_value depth budget exhausted (deeply nested CBOR)".into(),
+        ));
+    }
     let start = r.position();
     let first = *r
         .remaining()
@@ -372,14 +381,14 @@ fn skip_value(r: &mut CborReader<'_>) -> Result<()> {
         4 => {
             let n = r.read_array_header()?;
             for _ in 0..n {
-                skip_value(r)?;
+                skip_value_inner(r, depth - 1)?;
             }
         }
         5 => {
             let n = r.read_map_header()?;
             for _ in 0..n {
-                skip_value(r)?;
-                skip_value(r)?;
+                skip_value_inner(r, depth - 1)?;
+                skip_value_inner(r, depth - 1)?;
             }
         }
         7 => {
@@ -395,6 +404,43 @@ fn skip_value(r: &mut CborReader<'_>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cbor::CborWriter;
+
+    /// Build a CBOR map nested `depth` levels deep, terminated with a `null`.
+    fn nested_map(depth: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        for _ in 0..depth {
+            // Each level: 1-entry map with a 1-byte key.
+            out.push(0xA1); // map(1)
+            let mut k = CborWriter::new();
+            k.write_text("a");
+            out.extend_from_slice(&k.into_bytes());
+        }
+        // Innermost value: null.
+        out.push(0xF6);
+        out
+    }
+
+    #[test]
+    fn skip_value_rejects_deeply_nested_cbor() {
+        // Just above the budget — must error before stack overflow.
+        let depth_attack = crate::cbor::MAX_CBOR_SKIP_DEPTH as usize + 1;
+        let bytes = nested_map(depth_attack);
+        let mut r = CborReader::new(&bytes);
+        let err = skip_value(&mut r).unwrap_err();
+        assert!(
+            matches!(err, Error::CborDecode(ref s) if s.contains("depth budget")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn skip_value_accepts_shallow_nesting() {
+        // 3 levels of nesting — well within the budget.
+        let bytes = nested_map(3);
+        let mut r = CborReader::new(&bytes);
+        skip_value(&mut r).expect("3-level skip should succeed");
+    }
 
     #[test]
     fn direct_message_text_roundtrip() {

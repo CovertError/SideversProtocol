@@ -136,9 +136,9 @@
         state.sideAddress = info.side_address;
         const finalAddr = document.getElementById("ob-final-address");
         if (finalAddr) finalAddr.value = info.side_address;
-        const backup = document.getElementById("ob-backup-path");
-        if (backup && !backup.value) {
-          backup.value = `${state.dataDir}/${label}.seed`;
+        const backupFn = document.getElementById("ob-backup-filename");
+        if (backupFn && !backupFn.value) {
+          backupFn.value = `${label}-seed.bin`;
         }
         // Persist label so the Stage C UI can render it on the avatar.
         try {
@@ -159,13 +159,30 @@
     document.getElementById("ob-back-4").onclick = () => showStep(3);
     document.getElementById("ob-save-seed").onclick = async () => {
       showError("ob-backup-error", "");
-      const out = document.getElementById("ob-backup-path").value.trim();
-      if (!out) {
-        showError("ob-backup-error", "Pick a path first.");
+      const okEl = document.getElementById("ob-backup-ok");
+      if (okEl) okEl.textContent = "";
+      const filename = document.getElementById("ob-backup-filename").value.trim();
+      const passphrase = document.getElementById("ob-backup-passphrase").value;
+      const confirm = document.getElementById("ob-backup-passphrase-confirm").value;
+      if (!filename) {
+        showError("ob-backup-error", "Choose a filename.");
+        return;
+      }
+      if (!passphrase) {
+        showError("ob-backup-error", "Set a passphrase to encrypt the backup.");
+        return;
+      }
+      if (passphrase !== confirm) {
+        showError("ob-backup-error", "Passphrases do not match.");
         return;
       }
       try {
-        await invoke("write_seed_backup", { outPath: out });
+        const written = await invoke("write_seed_backup", {
+          dataDir: state.dataDir,
+          filename,
+          passphrase,
+        });
+        if (okEl) okEl.textContent = `Saved (encrypted) to: ${written}`;
         state.seedBackedUp = true;
         document.getElementById("ob-next-4").disabled = false;
       } catch (e) {

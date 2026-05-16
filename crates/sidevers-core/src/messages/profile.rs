@@ -505,6 +505,15 @@ fn read_optional_fields_map(
 /// Advance the reader past one CBOR value (skipping its bytes). Supports
 /// the major types we use for `any` values inside the fields sub-map.
 fn skip_value(r: &mut CborReader<'_>) -> Result<()> {
+    skip_value_inner(r, crate::cbor::MAX_CBOR_SKIP_DEPTH)
+}
+
+fn skip_value_inner(r: &mut CborReader<'_>, depth: u8) -> Result<()> {
+    if depth == 0 {
+        return Err(Error::CborDecode(
+            "skip_value depth budget exhausted (deeply nested CBOR)".into(),
+        ));
+    }
     let first = *r
         .remaining()
         .first()
@@ -523,14 +532,14 @@ fn skip_value(r: &mut CborReader<'_>) -> Result<()> {
         4 => {
             let n = r.read_array_header()?;
             for _ in 0..n {
-                skip_value(r)?;
+                skip_value_inner(r, depth - 1)?;
             }
         }
         5 => {
             let n = r.read_map_header()?;
             for _ in 0..n {
-                skip_value(r)?;
-                skip_value(r)?;
+                skip_value_inner(r, depth - 1)?;
+                skip_value_inner(r, depth - 1)?;
             }
         }
         7 => {

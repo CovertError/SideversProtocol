@@ -24,7 +24,7 @@
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -342,34 +342,173 @@ async fn auto_start_node(
     })
 }
 
-/// Write the active node's primary side seed to a user-chosen path,
-/// chmod 0o600. The wizard's "Backup seed" step calls this once.
+/// Sub-directory under `data_dir` where seed backups are written. The
+/// directory is owner-only (0o700 on Unix) so files inside inherit a
+/// safe default even before the per-file chmod runs.
+const BACKUP_SUBDIR: &str = "backups";
+
+/// Maximum permitted length of a backup filename (sanity bound, leaves
+/// generous room for "sidevers-seed-2026-05-16.bin" style names).
+const MAX_BACKUP_FILENAME_LEN: usize = 128;
+
+/// Validate a user-supplied filename for a seed backup, returning the
+/// absolute path it would land at: `<data_dir>/backups/<filename>`.
+///
+/// Rejects path separators, parent-dir refs, dotfiles, NUL bytes, and
+/// NTFS-reserved characters. The frontend chooses only the filename
+/// (not the full path), so an attacker who breaks out of the webview's
+/// CSP can no longer write the seed file to arbitrary locations like
+/// `~/.ssh/authorized_keys` (Audit P1.2).
+fn safe_backup_path(data_dir: &Path, filename: &str) -> Result<PathBuf, String> {
+    let trimmed = filename.trim();
+    if trimmed.is_empty() {
+        return Err("backup filename cannot be empty".into());
+    }
+    if trimmed.len() > MAX_BACKUP_FILENAME_LEN {
+        return Err(format!(
+            "backup filename too long (max {MAX_BACKUP_FILENAME_LEN} chars)"
+        ));
+    }
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        return Err("backup filename must not contain path separators".into());
+    }
+    if trimmed == "." || trimmed == ".." || trimmed.starts_with('.') {
+        return Err("backup filename cannot start with '.' or be a parent ref".into());
+    }
+    if trimmed
+        .chars()
+        .any(|c| matches!(c, '\0' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+    {
+        return Err("backup filename contains a forbidden character".into());
+    }
+    Ok(data_dir.join(BACKUP_SUBDIR).join(trimmed))
+}
+
+/// Write the active node's primary side seed to a passphrase-encrypted
+/// backup file inside `<data_dir>/backups/<filename>`. The seed is
+/// sealed with Argon2id+ChaCha20-Poly1305 (`sidevers_core::keystore`)
+/// before reaching disk — even if the resulting file lands on shared
+/// storage or in a backup tier, the passphrase is the only path to
+/// recovery (Audit P1.1 + P1.2).
 #[tauri::command]
 async fn write_seed_backup(
-    out_path: String,
+    data_dir: String,
+    filename: String,
+    passphrase: String,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<String, String> {
+    if passphrase.is_empty() {
+        return Err("a passphrase is required to back up the seed".into());
+    }
     let node = {
         let g = state.node.lock().await;
         g.as_ref()
             .cloned()
             .ok_or_else(|| "node not started — backup must run after start_node".to_owned())?
     };
-    let seed = node.side().to_seed();
-    let path = PathBuf::from(out_path);
-    tokio::fs::write(&path, &seed)
+    let dir = PathBuf::from(&data_dir);
+    let path = safe_backup_path(&dir, &filename)?;
+    let backup_dir = path
+        .parent()
+        .ok_or_else(|| "internal: safe_backup_path returned a path with no parent".to_owned())?;
+    tokio::fs::create_dir_all(backup_dir)
         .await
-        .map_err(|e| format!("writing seed file: {e}"))?;
-    // Owner-only — matches the CLI's write_secret pattern.
+        .map_err(|e| format!("creating backup dir: {e}"))?;
+    // Lock down the backups/ subdir to owner-only on Unix.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
-        let mut perms = meta.permissions();
+        let mut dir_perms = std::fs::metadata(backup_dir).map_err(|e| e.to_string())?.permissions();
+        dir_perms.set_mode(0o700);
+        std::fs::set_permissions(backup_dir, dir_perms).map_err(|e| e.to_string())?;
+    }
+
+    let seed = node.side().to_seed();
+    let sealed = sidevers_core::keystore::seal_seed(&seed, &passphrase)
+        .map_err(|e| format!("sealing seed: {e}"))?;
+    tokio::fs::write(&path, &sealed)
+        .await
+        .map_err(|e| format!("writing sealed seed file: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&path).map_err(|e| e.to_string())?.permissions();
         perms.set_mode(0o600);
         std::fs::set_permissions(&path, perms).map_err(|e| e.to_string())?;
     }
-    Ok(())
+    // On Windows the file inherits the user's profile ACL by default
+    // (data_dir is typically under %APPDATA%, which is per-user). The
+    // encrypted form (Argon2id+ChaCha20-Poly1305) is the primary
+    // defense; we accept the ACL gap as a documented limitation.
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod backup_path_tests {
+    use super::{MAX_BACKUP_FILENAME_LEN, safe_backup_path};
+    use std::path::Path;
+
+    fn root() -> &'static Path {
+        Path::new("/tmp/sv-test-data")
+    }
+
+    #[test]
+    fn good_filename_resolves_under_backups_subdir() {
+        let p = safe_backup_path(root(), "sidevers-seed-2026-05-16.bin").unwrap();
+        assert!(p.starts_with("/tmp/sv-test-data/backups/"));
+        assert!(p.ends_with("sidevers-seed-2026-05-16.bin"));
+    }
+
+    #[test]
+    fn rejects_forward_slash() {
+        assert!(safe_backup_path(root(), "../etc/passwd").is_err());
+        assert!(safe_backup_path(root(), "foo/bar").is_err());
+    }
+
+    #[test]
+    fn rejects_backslash() {
+        assert!(safe_backup_path(root(), "foo\\bar").is_err());
+    }
+
+    #[test]
+    fn rejects_dot_and_dotdot() {
+        assert!(safe_backup_path(root(), ".").is_err());
+        assert!(safe_backup_path(root(), "..").is_err());
+    }
+
+    #[test]
+    fn rejects_dotfile() {
+        assert!(safe_backup_path(root(), ".hidden").is_err());
+    }
+
+    #[test]
+    fn rejects_empty() {
+        assert!(safe_backup_path(root(), "").is_err());
+        assert!(safe_backup_path(root(), "   ").is_err());
+    }
+
+    #[test]
+    fn rejects_nul_and_ntfs_reserved_chars() {
+        assert!(safe_backup_path(root(), "a\0b").is_err());
+        assert!(safe_backup_path(root(), "a:b").is_err());
+        assert!(safe_backup_path(root(), "a*b").is_err());
+        assert!(safe_backup_path(root(), "a?b").is_err());
+        assert!(safe_backup_path(root(), "a<b>c").is_err());
+        assert!(safe_backup_path(root(), "a|b").is_err());
+        assert!(safe_backup_path(root(), "a\"b").is_err());
+    }
+
+    #[test]
+    fn rejects_overlong_filename() {
+        let long = "x".repeat(MAX_BACKUP_FILENAME_LEN + 1);
+        assert!(safe_backup_path(root(), &long).is_err());
+    }
+
+    #[test]
+    fn accepts_safe_unicode() {
+        let p = safe_backup_path(root(), "respaldo-清醒-2026.bin").unwrap();
+        assert!(p.ends_with("respaldo-清醒-2026.bin"));
+    }
 }
 
 // ---------------------------------------------------------------------

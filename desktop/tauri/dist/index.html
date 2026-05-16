@@ -93,22 +93,53 @@
           <p data-i18n="onboard.backup.warn">
             <strong>This is the only copy of your private key.</strong>
             If you lose it and never paired another device, your
-            identity is gone — there's no recovery service. Save the
-            file somewhere safe (a USB stick or encrypted vault, not
-            cloud-sync).
+            identity is gone — there's no recovery service. The file
+            below is encrypted with a passphrase you choose now; store
+            both the file and the passphrase somewhere safe (USB stick
+            or password manager, not cloud-sync).
           </p>
-          <div class="row">
+          <div class="sv-field">
+            <label class="sv-field-label" for="ob-backup-filename">
+              Filename
+            </label>
             <input
-              id="ob-backup-path"
+              id="ob-backup-filename"
               type="text"
               spellcheck="false"
-              data-i18n-placeholder="onboard.backup.path_placeholder"
+              placeholder="sidevers-seed-2026-05-16.bin"
             />
+          </div>
+          <div class="sv-field">
+            <label class="sv-field-label" for="ob-backup-passphrase">
+              Passphrase
+            </label>
+            <input
+              id="ob-backup-passphrase"
+              type="password"
+              spellcheck="false"
+              autocomplete="new-password"
+              placeholder="choose a strong passphrase"
+            />
+          </div>
+          <div class="sv-field">
+            <label class="sv-field-label" for="ob-backup-passphrase-confirm">
+              Confirm passphrase
+            </label>
+            <input
+              id="ob-backup-passphrase-confirm"
+              type="password"
+              spellcheck="false"
+              autocomplete="new-password"
+              placeholder="retype the passphrase"
+            />
+          </div>
+          <div class="row">
             <button id="ob-save-seed" data-i18n="btn.save_seed">
-              Save seed file
+              Save encrypted seed file
             </button>
           </div>
           <pre id="ob-backup-error" class="error" role="alert"></pre>
+          <pre id="ob-backup-ok" class="hint" aria-live="polite"></pre>
           <div class="onboarding-actions">
             <button id="ob-back-4" class="secondary" data-i18n="btn.back">Back</button>
             <button id="ob-next-4" disabled data-i18n="btn.next">Next</button>
@@ -499,20 +530,39 @@
                 Backup
               </div>
               <p class="sv-form-sub" data-i18n="settings.backup_sub">
-                Export the active side's seed file. Treat it like a master
-                password — anyone with it can impersonate this side.
+                Export the active side's seed file, encrypted with a
+                passphrase. The file lands in your data directory under
+                <code>backups/</code>; copy it to a USB stick or
+                password vault. Anyone with both the file and the
+                passphrase can impersonate this side.
               </p>
               <div class="sv-field">
-                <label class="sv-field-label" data-i18n="settings.backup_path_label">
-                  Save to
+                <label class="sv-field-label" for="settings-backup-filename">
+                  Filename
                 </label>
-                <input id="settings-backup-path" type="text"
-                       data-i18n-placeholder="onboard.backup.path_placeholder"
-                       placeholder="path to seed file" />
+                <input id="settings-backup-filename" type="text"
+                       spellcheck="false"
+                       placeholder="sidevers-seed.bin" />
+              </div>
+              <div class="sv-field">
+                <label class="sv-field-label" for="settings-backup-passphrase">
+                  Passphrase
+                </label>
+                <input id="settings-backup-passphrase" type="password"
+                       autocomplete="new-password"
+                       placeholder="choose a strong passphrase" />
+              </div>
+              <div class="sv-field">
+                <label class="sv-field-label" for="settings-backup-passphrase-confirm">
+                  Confirm passphrase
+                </label>
+                <input id="settings-backup-passphrase-confirm" type="password"
+                       autocomplete="new-password"
+                       placeholder="retype the passphrase" />
               </div>
               <div class="sv-field-row">
                 <button id="settings-backup-save"
-                        data-i18n="btn.save_seed">Save seed file</button>
+                        data-i18n="btn.save_seed">Save encrypted seed file</button>
               </div>
             </div>
 

@@ -18,6 +18,20 @@
 
 use crate::error::{Error, Result};
 
+/// Hard cap on the count argument returned by `read_array_header` /
+/// `read_map_header`. A peer cannot trick a decoder into pre-allocating
+/// `Vec::with_capacity(u32::MAX)` and OOM-ing the process — both readers
+/// refuse counts above this ceiling. 1 million entries is generous (any
+/// legitimate message stays well below ~1 thousand) and blocks the
+/// adversarial case cheaply.
+pub const MAX_CBOR_ENTRIES: usize = 1 << 20;
+
+/// Maximum depth of nested CBOR maps/arrays that the recursive
+/// `skip_value` helpers in `messages::*` will descend into. Stops a
+/// crafted deeply-nested payload from blowing the parser stack. Real
+/// messages do not nest more than ~3 levels.
+pub const MAX_CBOR_SKIP_DEPTH: u8 = 32;
+
 /// Major type bits, shifted into the high nibble of the initial byte.
 const MT_UINT: u8 = 0 << 5;
 const MT_NEGINT: u8 = 1 << 5;
@@ -386,6 +400,11 @@ impl<'a> CborReader<'a> {
                 "expected map, got major {major}"
             )));
         }
+        if arg > MAX_CBOR_ENTRIES as u64 {
+            return Err(Error::CborDecode(format!(
+                "map count {arg} exceeds MAX_CBOR_ENTRIES"
+            )));
+        }
         Ok(arg as usize)
     }
 
@@ -394,6 +413,11 @@ impl<'a> CborReader<'a> {
         if major != 4 {
             return Err(Error::CborDecode(format!(
                 "expected array, got major {major}"
+            )));
+        }
+        if arg > MAX_CBOR_ENTRIES as u64 {
+            return Err(Error::CborDecode(format!(
+                "array count {arg} exceeds MAX_CBOR_ENTRIES"
             )));
         }
         Ok(arg as usize)
@@ -469,6 +493,33 @@ mod tests {
         ];
         let encoded = encode_map(&entries);
         assert_canonical(&encoded).unwrap();
+    }
+
+    #[test]
+    fn map_header_rejects_count_above_max_entries() {
+        // CBOR map header with count = u32::MAX (well above MAX_CBOR_ENTRIES).
+        // Head byte 0xBA = major 5 (map) + info 26 (u32 follow).
+        let mut bad = vec![0xBA];
+        bad.extend_from_slice(&u32::MAX.to_be_bytes());
+        let mut r = CborReader::new(&bad);
+        let err = r.read_map_header().unwrap_err();
+        assert!(
+            matches!(err, Error::CborDecode(ref s) if s.contains("MAX_CBOR_ENTRIES")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn array_header_rejects_count_above_max_entries() {
+        // Head byte 0x9A = major 4 (array) + info 26 (u32 follow).
+        let mut bad = vec![0x9A];
+        bad.extend_from_slice(&u32::MAX.to_be_bytes());
+        let mut r = CborReader::new(&bad);
+        let err = r.read_array_header().unwrap_err();
+        assert!(
+            matches!(err, Error::CborDecode(ref s) if s.contains("MAX_CBOR_ENTRIES")),
+            "got {err:?}"
+        );
     }
 
     #[test]

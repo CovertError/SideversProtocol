@@ -1061,10 +1061,22 @@ function attachStaticHandlers() {
   );
   $("settings-backup-save")?.addEventListener("click", () =>
     safe(async () => {
-      const path = $("settings-backup-path").value.trim();
-      if (!path) throw new Error("save path required");
-      await call("write_seed_backup", { outPath: path });
-      showOk(t("btn.save_seed"));
+      if (!state.dataDir) throw new Error("no active data dir");
+      const filename = $("settings-backup-filename").value.trim();
+      const passphrase = $("settings-backup-passphrase").value;
+      const confirm = $("settings-backup-passphrase-confirm").value;
+      if (!filename) throw new Error("filename required");
+      if (!passphrase) throw new Error("passphrase required (the backup is encrypted)");
+      if (passphrase !== confirm) throw new Error("passphrases do not match");
+      const written = await call("write_seed_backup", {
+        dataDir: state.dataDir,
+        filename,
+        passphrase,
+      });
+      // Clear the passphrase fields so they don't linger in the DOM.
+      $("settings-backup-passphrase").value = "";
+      $("settings-backup-passphrase-confirm").value = "";
+      showOk(`Encrypted seed saved to ${written}`);
     }),
   );
 

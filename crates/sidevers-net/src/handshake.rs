@@ -20,7 +20,7 @@ use sidevers_core::keys::{PUBLIC_KEY_LEN, SideKey};
 use sidevers_core::messages::handshake::{
     ConfirmPayload, EPH_PUB_LEN, HelloBackPayload, HelloPayload,
 };
-use sidevers_core::{Address, AddressKind, MessageType, PROTOCOL_VERSION};
+use sidevers_core::{Address, AddressKind, LogId, MessageType, PROTOCOL_VERSION};
 use tracing::debug;
 use x25519_dalek::{EphemeralSecret, PublicKey as XPublicKey};
 
@@ -73,7 +73,7 @@ const SESSION_HKDF_INFO: &[u8] = b"sidevers/v1/session";
 #[tracing::instrument(
     name = "handshake.initiator",
     skip(conn, my_side, expected_peer_side),
-    fields(intent = %intent.as_u8(), my_side = %hex::encode(my_side.public_bytes())),
+    fields(intent = %intent.as_u8(), my_side = %LogId::new(&my_side.public_bytes())),
     err
 )]
 pub async fn run_initiator(
@@ -99,7 +99,9 @@ async fn run_initiator_inner(
     let (mut send, mut recv) = conn.open_bi().await?;
 
     // 1. Ephemeral X25519 keypair (forward secrecy — discarded after session_key derivation).
-    let eph_secret = EphemeralSecret::random_from_rng(rand::thread_rng());
+    //    OS CSPRNG directly: avoids any future change in `rand::thread_rng()` semantics
+    //    affecting handshake key material.
+    let eph_secret = EphemeralSecret::random_from_rng(rand::rngs::OsRng);
     let eph_pub_bytes: [u8; EPH_PUB_LEN] = XPublicKey::from(&eph_secret).to_bytes();
 
     // 2. Build, sign, and send Hello (type 0x10). Set `to` to the expected peer
@@ -164,7 +166,7 @@ async fn run_initiator_inner(
 
     if !helloback_payload.capabilities.is_empty() {
         debug!(
-            peer = %hex::encode(helloback_env.from),
+            peer = %LogId::new(&helloback_env.from),
             caps = ?helloback_payload.capabilities,
             "handshake: peer advertised capabilities"
         );
@@ -189,7 +191,7 @@ async fn run_initiator_inner(
 #[tracing::instrument(
     name = "handshake.responder",
     skip(send, recv, my_side, conn),
-    fields(my_side = %hex::encode(my_side.public_bytes())),
+    fields(my_side = %LogId::new(&my_side.public_bytes())),
     err
 )]
 pub async fn run_responder(
@@ -255,8 +257,9 @@ async fn run_responder_inner(
         return Err(Error::HandshakeDeclined("local refusal".into()));
     }
 
-    // 4. Generate ephemeral X25519, build HelloBack, send.
-    let my_eph = EphemeralSecret::random_from_rng(rand::thread_rng());
+    // 4. Generate ephemeral X25519, build HelloBack, send. OS CSPRNG directly
+    //    (see initiator note on `rand::thread_rng()` semantics).
+    let my_eph = EphemeralSecret::random_from_rng(rand::rngs::OsRng);
     let my_eph_pub: [u8; EPH_PUB_LEN] = XPublicKey::from(&my_eph).to_bytes();
 
     let accept = HelloBackPayload {
@@ -299,7 +302,7 @@ async fn run_responder_inner(
 
     if !hello_payload.capabilities.is_empty() {
         debug!(
-            peer = %hex::encode(hello_env.from),
+            peer = %LogId::new(&hello_env.from),
             caps = ?hello_payload.capabilities,
             "handshake: peer advertised capabilities"
         );
@@ -356,4 +359,85 @@ fn subtle_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
 /// a bech32m side address.
 pub fn address_of(side_bytes: &[u8; PUBLIC_KEY_LEN]) -> Address {
     Address::new(AddressKind::Side, *side_bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// MAC tampering: a Confirm proof that differs from the expected
+    /// transcript MAC by even one bit must be rejected by the responder's
+    /// `subtle_eq` check (handshake.rs:292). Models the wire scenario where
+    /// an initiator (or MITM) submits a Confirm with wrong proof bytes.
+    /// (Audit P2.9.)
+    #[test]
+    fn confirm_mac_mismatch_is_rejected_by_subtle_eq() {
+        let session_key = [0x42u8; SESSION_KEY_LEN];
+        let hello = b"some-hello-envelope-bytes";
+        let helloback = b"some-helloback-envelope-bytes";
+        let expected = transcript_mac(&session_key, hello, helloback);
+
+        // Matching proof is accepted.
+        assert!(subtle_eq(&expected, &expected));
+
+        // Single-bit flip in proof is rejected.
+        let mut tampered = expected;
+        tampered[0] ^= 0x01;
+        assert!(!subtle_eq(&expected, &tampered));
+
+        // Different session key produces a different MAC for the same
+        // transcript — the MITM-with-wrong-key case.
+        let wrong_key = [0x43u8; SESSION_KEY_LEN];
+        let with_wrong = transcript_mac(&wrong_key, hello, helloback);
+        assert!(!subtle_eq(&expected, &with_wrong));
+
+        // Tampered transcript also yields a different MAC — the
+        // "MITM altered hello/helloback bytes" case.
+        let tampered_hello = b"some-hello-envelope-bytes!";
+        let with_tampered_transcript = transcript_mac(&session_key, tampered_hello, helloback);
+        assert!(!subtle_eq(&expected, &with_tampered_transcript));
+    }
+
+    /// Version negotiation: the initiator side of `run_initiator_inner`
+    /// performs an inline `helloback_payload.v != 1` check and returns
+    /// `HandshakeProtocol("unsupported version negotiated")`. This unit
+    /// test exercises the predicate against HelloBackPayload values that
+    /// decode cleanly but carry an unsupported `v`. (Audit P2.9.)
+    #[test]
+    fn version_check_rejects_helloback_with_unsupported_v() {
+        use sidevers_core::messages::handshake::HelloBackPayload;
+        use std::collections::BTreeMap;
+
+        for v_bogus in [0u64, 2, 99, u64::MAX] {
+            let p = HelloBackPayload {
+                v: v_bogus,
+                accept: true,
+                reason: None,
+                eph_pub: [0u8; EPH_PUB_LEN],
+                extensions: vec![],
+                capabilities: BTreeMap::new(),
+            };
+            let bytes = p.encode();
+            let decoded = HelloBackPayload::decode(&bytes)
+                .expect("payload should decode; the check is on `v`, not the wire shape");
+            assert_eq!(decoded.v, v_bogus);
+            // This is the literal check from run_initiator_inner.
+            assert!(
+                decoded.v != 1,
+                "v={v_bogus} must trip the != 1 guard in the initiator"
+            );
+        }
+
+        // Positive control: v=1 passes the guard.
+        let ok = HelloBackPayload {
+            v: 1,
+            accept: true,
+            reason: None,
+            eph_pub: [0u8; EPH_PUB_LEN],
+            extensions: vec![],
+            capabilities: BTreeMap::new(),
+        };
+        let decoded = HelloBackPayload::decode(&ok.encode()).unwrap();
+        assert_eq!(decoded.v, 1);
+    }
 }

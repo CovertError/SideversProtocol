@@ -28,7 +28,7 @@ use sidevers_core::messages::verse::{
 use sidevers_core::payload as core_payload;
 use sidevers_core::replay::{DEFAULT_TTL_SECS, ReplayCache};
 use sidevers_core::verse::{ContractObject, MembershipToken, VerseContentKey};
-use sidevers_core::{Address, AddressKind, MessageType};
+use sidevers_core::{Address, AddressKind, LogId, MessageType};
 use sidevers_storage::ObjectStore;
 use sidevers_storage::object::ADDRESS_LEN;
 use tokio::sync::{Mutex, mpsc};
@@ -490,7 +490,7 @@ impl Node {
     #[tracing::instrument(
         name = "pairing.accept",
         skip(self, qr),
-        fields(side = %hex::encode(qr.side), dial_addr = %qr.dial_addr),
+        fields(side = %LogId::new(&qr.side), dial_addr = %qr.dial_addr),
         err
     )]
     pub async fn accept_pairing(&self, qr: PairingQr) -> Result<(Arc<Side>, SocketAddr)> {
@@ -732,7 +732,7 @@ impl Node {
     #[tracing::instrument(
         name = "delta.push",
         skip(self, ops),
-        fields(side = %hex::encode(side_addr), op_count = ops.len())
+        fields(side = %LogId::new(side_addr), op_count = ops.len())
     )]
     pub async fn push_delta_to_co_holders(&self, side_addr: &[u8; 32], ops: Vec<DeltaOp>) {
         let side = match self.side_by_address(side_addr).await {
@@ -1303,7 +1303,7 @@ impl Node {
 #[tracing::instrument(
     name = "accept.loop",
     skip(endpoint, services),
-    fields(side = %hex::encode(services.side.public_bytes())),
+    fields(side = %LogId::new(&services.side.public_bytes())),
 )]
 async fn accept_loop(endpoint: quinn::Endpoint, services: Services) {
     while let Some(incoming) = endpoint.accept().await {
@@ -1371,7 +1371,7 @@ async fn handle_connection(conn: quinn::Connection, services: Services) -> Resul
 #[tracing::instrument(
     name = "serve.direct",
     skip(session, services),
-    fields(peer = %hex::encode(session.peer_side)),
+    fields(peer = %LogId::new(&session.peer_side)),
     err
 )]
 async fn serve_direct(session: Session, services: Services) -> Result<()> {
@@ -1520,7 +1520,7 @@ async fn serve_direct(session: Session, services: Services) -> Result<()> {
                 if env.from != proof.side_a && env.from != proof.side_b {
                     debug!(
                         "LINKAGE_PUBLISH: sender ({}) is neither linked side; dropping",
-                        hex::encode(env.from)
+                        LogId::new(&env.from)
                     );
                     continue;
                 }
@@ -1738,7 +1738,7 @@ async fn build_state_bundle_inner(services: &Services) -> Result<StateBundleInne
 #[tracing::instrument(
     name = "serve.storage",
     skip(session, services),
-    fields(peer = %hex::encode(session.peer_side)),
+    fields(peer = %LogId::new(&session.peer_side)),
     err
 )]
 async fn serve_storage(session: Session, services: Services) -> Result<()> {
@@ -1873,7 +1873,7 @@ async fn serve_storage(session: Session, services: Services) -> Result<()> {
                 {
                     debug!(
                         "storage retract: sender ({}) never published 0x{:02x}…; ignoring",
-                        hex::encode(env.from),
+                        LogId::new(&env.from),
                         retract.hash[0]
                     );
                     services.metrics.incr_storage_retract_ignored();
@@ -1886,7 +1886,7 @@ async fn serve_storage(session: Session, services: Services) -> Result<()> {
                 if others_remain {
                     debug!(
                         "storage retract: {} dropped; other publishers still back 0x{:02x}…",
-                        hex::encode(env.from),
+                        LogId::new(&env.from),
                         retract.hash[0]
                     );
                     continue;
@@ -1912,7 +1912,7 @@ async fn serve_storage(session: Session, services: Services) -> Result<()> {
 #[tracing::instrument(
     name = "serve.gossip",
     skip(session, services),
-    fields(peer = %hex::encode(session.peer_side)),
+    fields(peer = %LogId::new(&session.peer_side)),
     err
 )]
 async fn serve_gossip(session: Session, services: Services) -> Result<()> {
@@ -2078,7 +2078,7 @@ async fn serve_gossip(session: Session, services: Services) -> Result<()> {
 #[tracing::instrument(
     name = "serve.verse",
     skip(session, services),
-    fields(peer = %hex::encode(session.peer_side)),
+    fields(peer = %LogId::new(&session.peer_side)),
     err
 )]
 async fn serve_verse(session: Session, services: Services) -> Result<()> {
@@ -2331,8 +2331,8 @@ async fn serve_verse(session: Session, services: Services) -> Result<()> {
                     None => {
                         if hosts.len() > 1 {
                             debug!(
-                                env_to = ?env.to.as_ref().map(hex::encode),
-                                default = %hex::encode(default_addr_opt.unwrap_or([0u8; 32])),
+                                env_to = ?env.to.as_ref().map(|b| LogId::new(b).to_string()),
+                                default = %LogId::new(&default_addr_opt.unwrap_or([0u8; 32])),
                                 "VERSE_POST: env.to absent or not hosted; falling through to default verse host (multi-verse routing — likely a sender bug)"
                             );
                         }
@@ -2420,7 +2420,7 @@ async fn serve_verse(session: Session, services: Services) -> Result<()> {
                     None => {
                         debug!(
                             "VerseLeave for verse {} not hosted on this node; ignoring",
-                            hex::encode(leave.verse)
+                            LogId::new(&leave.verse)
                         );
                         continue;
                     }
@@ -2445,7 +2445,7 @@ async fn serve_verse(session: Session, services: Services) -> Result<()> {
                         .retract_by_author(&verse_addr, &leave.side)
                         .await;
                     debug!(
-                        author = %hex::encode(leave.side),
+                        author = %LogId::new(&leave.side),
                         retracted = n,
                         "verse leave disposition=Retract: dropped author's posts"
                     );
@@ -2470,7 +2470,7 @@ async fn serve_verse(session: Session, services: Services) -> Result<()> {
                     None => {
                         debug!(
                             "VerseRemove for verse {} not hosted on this node; ignoring",
-                            hex::encode(remove.verse)
+                            LogId::new(&remove.verse)
                         );
                         continue;
                     }
@@ -2489,7 +2489,7 @@ async fn serve_verse(session: Session, services: Services) -> Result<()> {
                 if !is_mod {
                     debug!(
                         "VerseRemove issued_by ({}) is neither the verse keypair nor a listed moderator; rejected",
-                        hex::encode(remove.issued_by)
+                        LogId::new(&remove.issued_by)
                     );
                     let _ = verse_pk;
                     continue;
@@ -2698,7 +2698,7 @@ async fn fanout_broadcast(services: &Services, env: &Envelope, source_peer: &[u8
             for (peer_key, conn) in connections.drain(..) {
                 if services.reputation.is_refused(&peer_key).await {
                     debug!(
-                        peer = %hex::encode(peer_key),
+                        peer = %LogId::new(&peer_key),
                         "gossip-policy: skipping refused peer in fanout"
                     );
                     continue;
@@ -2712,7 +2712,7 @@ async fn fanout_broadcast(services: &Services, env: &Envelope, source_peer: &[u8
             for (peer_key, conn) in connections.drain(..) {
                 if !services.side_state.relationship_contains(&peer_key).await {
                     debug!(
-                        peer = %hex::encode(peer_key),
+                        peer = %LogId::new(&peer_key),
                         "gossip-policy: skipping non-relationship peer in fanout"
                     );
                     continue;
@@ -2824,7 +2824,7 @@ async fn check_freshness_and_replay_metered(
             m.incr_warned_skew_soft();
         }
         warn!(
-            from = %hex::encode(env.from),
+            from = %LogId::new(&env.from),
             skew_secs = skew,
             "clock-skew warning: envelope outside default window but within soft limit — check local clock"
         );
@@ -2870,7 +2870,7 @@ async fn check_retirement(env: &Envelope, services: &Services) {
     if services.side_state.is_retired_seen(&env.from).await {
         warn!(
             "anomalous: signature from retired side {}",
-            hex::encode(env.from)
+            LogId::new(&env.from)
         );
     }
 }

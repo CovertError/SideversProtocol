@@ -295,6 +295,81 @@ mod tests {
         assert_eq!(session.peer_side, *bob.address().key_bytes());
     }
 
+    /// Replay rejection: sending the same `(from, nonce)` envelope twice
+    /// must surface only once on the receiver. Exercises the receive-path
+    /// replay cache check end-to-end. (Audit P2.9.)
+    #[tokio::test]
+    async fn replay_rejection_blocks_duplicate_envelope_at_receiver() {
+        use sidevers_core::envelope::{NONCE_LEN, now_unix_seconds, random_nonce};
+        use sidevers_core::payload as core_payload;
+        use sidevers_core::{Envelope, MessageType};
+
+        let alice = TestNode::spawn("alice").await;
+        let bob = TestNode::spawn("bob").await;
+        let session = alice
+            .node
+            .dial(bob.listen_addr(), Intent::Direct)
+            .await
+            .unwrap();
+
+        // Hand-build a DM envelope with a fixed nonce so we can replay it.
+        // Plaintext is treated as opaque bytes by the DM path (matching
+        // what `send_dm` does).
+        let alice_side = alice.node.side();
+        let nonce: [u8; NONCE_LEN] = random_nonce().unwrap();
+        let plaintext: &[u8] = b"replay-target";
+        let ciphertext = core_payload::seal(
+            plaintext,
+            alice_side,
+            &session.peer_side,
+            &nonce,
+            b"",
+        )
+        .unwrap();
+        let env = Envelope::sign_with(
+            MessageType::DIRECT_MESSAGE,
+            alice_side,
+            Some(session.peer_side),
+            ciphertext,
+            now_unix_seconds().unwrap(),
+            nonce,
+        )
+        .unwrap();
+
+        // First submission: should land.
+        let (mut s1, _) = session.open_and_send(&env).await.unwrap();
+        let _ = s1.finish();
+        let _ = s1.stopped().await;
+
+        let first = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            bob.node.next_direct_message(),
+        )
+        .await
+        .expect("first DM should arrive")
+        .expect("DM stream not closed");
+        assert_eq!(&first.plaintext, plaintext);
+        assert_eq!(first.envelope.nonce, nonce);
+
+        // Second submission of the EXACT same envelope bytes: must be
+        // dropped at the replay cache before reaching the inbox.
+        let (mut s2, _) = session.open_and_send(&env).await.unwrap();
+        let _ = s2.finish();
+        let _ = s2.stopped().await;
+
+        // Give the receiver a moment to process (and drop) the replay.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let replay = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            bob.node.next_direct_message(),
+        )
+        .await;
+        assert!(
+            replay.is_err(),
+            "replay must not surface a second DirectMessageReceived event"
+        );
+    }
+
     // =====================================================================
     // Month 4 — peer-exchange, rendezvous, store-and-forward, gossip
     // =====================================================================
