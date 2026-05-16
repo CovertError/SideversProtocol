@@ -1,40 +1,35 @@
-// Sidevers onboarding wizard — Phase 3.D.
+// Sidevers onboarding wizard — Phase 3.D + Stage C boot orchestrator.
 //
 // Loads as a plain script (NOT a module) so it can interleave with
 // main.js, which is also plain-script. On boot:
 //
 //   1. Asks the Rust side for the default data dir.
-//   2. Asks `is_onboarded(default_data_dir)`. If true → hides
-//      #onboarding entirely; main.js owns the page.
-//   3. Otherwise: reveals #onboarding and runs the 5-step flow.
-//      Each step's "Next" gates on the previous step's effect (data
-//      dir typed, side created via start_node, seed file written).
+//   2. Asks is_onboarded(default_data_dir). If true → skip the wizard,
+//      call auto_start_node to rehydrate persisted sides, then hand
+//      off to window.svBoot(nodeInfo, dataDir) which renders the
+//      Stage C chat-first shell.
+//   3. Otherwise: reveal #onboarding and run the 5-step wizard. On
+//      finish, complete_onboarding flips the flag, and the wizard
+//      hands off to window.svBoot() using the start_node response.
 //
-// At the final step, calls `complete_onboarding(data_dir)` to flip
-// the durable flag, then hides #onboarding and lets main.js take
-// over without a reload — start_node has already been called, so the
-// UI is in the same state it'd be in if the user clicked Start.
-//
-// Strings are i18n-driven via data-i18n attributes; the wizard
-// doesn't construct dynamic copy itself.
+// The wizard step that creates the side calls start_node directly
+// (mint-fresh path). Subsequent launches use auto_start_node, which
+// loads the persisted side instead of minting a new one.
 
 (function () {
   const tauri = window.__TAURI__;
   if (!tauri) {
-    // No Tauri runtime — opening dist/index.html in a browser. Hide
-    // the wizard so the rest of the page is at least inspectable.
     const root = document.getElementById("onboarding");
     if (root) root.hidden = true;
     return;
   }
   const invoke = tauri.core.invoke;
 
-  // Internal state: the data dir + side address chosen during the
-  // flow. Closed over by all the step handlers.
   const state = {
     dataDir: "",
     sideAddress: "",
     seedBackedUp: false,
+    nodeInfo: null,
   };
 
   const root = document.getElementById("onboarding");
@@ -57,6 +52,26 @@
     el.textContent = msg || "";
   }
 
+  function handoff(nodeInfo, dataDir) {
+    root.hidden = true;
+    if (typeof window.svBoot === "function") {
+      window.svBoot(nodeInfo, dataDir);
+    } else {
+      // Race: main.js hasn't run yet (shouldn't happen with script
+      // order in index.html, but be defensive). Poll briefly.
+      let tries = 0;
+      const t = setInterval(() => {
+        if (typeof window.svBoot === "function") {
+          clearInterval(t);
+          window.svBoot(nodeInfo, dataDir);
+        } else if (++tries > 50) {
+          clearInterval(t);
+          console.warn("svBoot never appeared");
+        }
+      }, 30);
+    }
+  }
+
   async function boot() {
     let defaultDir = "";
     try {
@@ -66,10 +81,6 @@
     }
     state.dataDir = defaultDir;
 
-    // Check the onboarding flag against the default dir. If the user
-    // had a previous install at a non-default path the flag won't be
-    // here — they'll be re-onboarded. Acceptable for a Phase-1
-    // reference client.
     let onboarded = false;
     try {
       if (defaultDir) {
@@ -78,12 +89,25 @@
     } catch (e) {
       console.warn("is_onboarded failed:", e);
     }
+
     if (onboarded) {
-      root.hidden = true;
+      // Returning user — auto-start the node from persisted sides.
+      try {
+        const nodeInfo = await invoke("auto_start_node", { dataDir: defaultDir });
+        handoff(nodeInfo, defaultDir);
+      } catch (e) {
+        // No persisted sides yet (shouldn't happen if onboarding_completed
+        // is set, but be tolerant) → fall back to wizard.
+        console.warn("auto_start_node failed; showing wizard:", e);
+        revealWizard(defaultDir);
+      }
       return;
     }
 
-    // Show the wizard. Wire each step.
+    revealWizard(defaultDir);
+  }
+
+  function revealWizard(defaultDir) {
     root.hidden = false;
     const ddInput = document.getElementById("ob-data-dir");
     if (ddInput) ddInput.value = defaultDir;
@@ -108,13 +132,23 @@
           dataDir: state.dataDir,
           sideLabel: label,
         });
+        state.nodeInfo = info;
         state.sideAddress = info.side_address;
         const finalAddr = document.getElementById("ob-final-address");
         if (finalAddr) finalAddr.value = info.side_address;
-        // Pre-fill a default backup path so the user can hit save quickly.
         const backup = document.getElementById("ob-backup-path");
         if (backup && !backup.value) {
           backup.value = `${state.dataDir}/${label}.seed`;
+        }
+        // Persist label so the Stage C UI can render it on the avatar.
+        try {
+          await invoke("set_setting", {
+            dataDir: state.dataDir,
+            key: "last_active_side",
+            value: info.side_address,
+          });
+        } catch (e) {
+          console.warn("set last_active_side failed:", e);
         }
         showStep(4);
       } catch (e) {
@@ -149,47 +183,12 @@
       } catch (e) {
         console.warn("complete_onboarding failed:", e);
       }
-      root.hidden = true;
-      // Pre-fill main UI's data-dir input + propagate the "node is
-      // started" state. start_node was already called during step 3
-      // so the main UI's buttons need to reflect that without the
-      // user re-clicking Start.
-      const mainDd = document.getElementById("data-dir");
-      if (mainDd) mainDd.value = state.dataDir;
-      const mainSl = document.getElementById("side-label");
-      if (mainSl) mainSl.value = "work";
-      const setDisabled = (id, v) => {
-        const el = document.getElementById(id);
-        if (el) el.disabled = v;
-      };
-      setDisabled("start-node", true);
-      for (const id of [
-        "stop-node",
-        "connect-peer",
-        "gen-qr",
-        "accept-qr",
-        "refresh-sides",
-        "add-side",
-      ]) {
-        setDisabled(id, false);
-      }
-      // Update status indicator.
-      const dot = document.getElementById("status-dot");
-      if (dot) {
-        dot.classList.add("dot-running");
-        dot.classList.remove("dot-idle");
-      }
-      const statusText = document.getElementById("status-text");
-      if (statusText) statusText.textContent = "Node up";
-      // Refresh sides list so the new side appears.
-      const btn = document.getElementById("refresh-sides");
-      if (btn) btn.click();
+      handoff(state.nodeInfo, state.dataDir);
     };
 
     showStep(1);
   }
 
-  // Wait for the document to be ready before wiring anything.
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", boot);
   } else {

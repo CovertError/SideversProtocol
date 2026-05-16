@@ -3,16 +3,11 @@
  * Built into `dist/style.css` by `desktop/tauri/build-tailwind.sh`
  * using the standalone Tailwind v4 CLI (see `tools/README.md`).
  *
- * Three sections below:
- *   1. @import "tailwindcss"      — pulls in Tailwind preflight + utilities
- *   2. @theme { ... }             — brand-locked color tokens + fonts;
- *                                   these names become utility classes
- *                                   (bg-sv-bg, text-sv-text, etc.)
- *   3. @layer base { ... }        — the existing hand-written rules,
- *                                   pasted verbatim so Stage A produces
- *                                   a visually-identical page. Stage C
- *                                   deletes most of this as sections
- *                                   migrate to Tailwind utility classes.
+ * Stage C: chat-first UX with a three-column shell (side rail +
+ * in-side nav + main pane). The old Stage A bridge rules for the
+ * stacked-cards UI are gone — replaced by a focused @layer
+ * components block. Only the wizard styles + low-level form/button
+ * baselines stay in @layer base.
  */
 
 @import "tailwindcss";
@@ -46,8 +41,8 @@
 }
 
 /* Dark mode flips the semantic aliases. Tailwind v4 default
- * darkMode = `class` — `<html class="dark">` activates. The
- * Settings section's theme toggle persists this via SideStore. */
+ * darkMode = `class` — `<html class="dark">` activates. Settings
+ * page's theme toggle persists this via SideStore. */
 .dark {
   --color-sv-bg: var(--color-sv-onyx);
   --color-sv-surface: var(--color-sv-ink);
@@ -56,20 +51,6 @@
   --color-sv-text-muted: var(--color-sv-silver);
   --color-sv-text-strong: var(--color-sv-snow);
 }
-
-/* ---------------------------------------------------------------------
- * Stage A bridge: existing hand-written CSS pasted as @layer base
- * so the first Tailwind build produces a visually-identical page.
- * Stage C deletes these rules section-by-section as the markup
- * migrates to Tailwind utilities.
- *
- * Notes:
- *   * @font-face declarations have to live OUTSIDE @layer base
- *     (browsers refuse to honor them inside cascade layers in
- *     some engines). Kept at top-level here.
- *   * The page-default background / text colors come from the
- *     body rule below, which now references the @theme aliases.
- * --------------------------------------------------------------------- */
 
 /* Phase 3.J local @font-face — files in dist/fonts/. If absent, the
  * font-family stack falls through to system sans-serif. */
@@ -103,9 +84,7 @@
 }
 
 @layer base {
-  /* Body baseline. Tailwind's preflight resets margins/padding;
-   * our brand background + text colors come from the @theme
-   * semantic aliases above. */
+  /* Body baseline. */
   html,
   body {
     height: 100%;
@@ -119,127 +98,16 @@
       "ss02";
   }
 
-  /* All the existing card / input / button rules are kept here
-   * verbatim so Stage A is visually a no-op. Each is tagged with
-   * the section it'll get migrated out of in Stage C; once the
-   * matching section's markup uses Tailwind utilities, the
-   * corresponding rule below can be deleted.
-   */
-
-  /* topbar */
-  .topbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0.875rem 1.5rem;
-    border-bottom: 1px solid var(--color-sv-border);
-    background: var(--color-sv-bg);
-  }
-  .logo {
-    height: 28px;
-    width: auto;
-  }
-  @media (prefers-color-scheme: dark) {
-    .logo {
-      filter: invert(1);
-    }
-  }
-  .topbar-right {
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-  }
-  .lang-switch {
-    background: var(--color-sv-bg);
-    color: var(--color-sv-text);
-    border: 1px solid var(--color-sv-border);
-    border-radius: 5px;
-    padding: 0.25rem 0.5rem;
-    font-family: inherit;
-    font-size: 0.78rem;
-    cursor: pointer;
-  }
-  .status {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-size: 0.82rem;
-    color: var(--color-sv-text-muted);
-  }
-  .dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    display: inline-block;
-  }
-  .dot-idle {
-    background: var(--color-sv-silver-light);
-  }
-  .dot-running {
-    background: var(--color-sv-ink);
-  }
-  @media (prefers-color-scheme: dark) {
-    .dot-running {
-      background: var(--color-sv-snow);
-    }
-  }
-
-  /* main + cards */
-  main {
-    padding: 1.25rem 1.5rem 2rem;
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
-    max-width: 980px;
-  }
-  .card {
-    background: var(--color-sv-surface);
-    border: 1px solid var(--color-sv-border);
-    border-radius: 8px;
-    padding: 1rem 1.25rem 1.25rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.625rem;
-  }
-  .card h2 {
-    margin: 0;
-    font-size: 0.95rem;
-    font-weight: 600;
-    letter-spacing: -0.01em;
-    color: var(--color-sv-text);
-  }
-  .muted {
-    margin: 0 0 0.25rem;
-    color: var(--color-sv-text-muted);
-    font-size: 0.85rem;
-  }
-  .label {
-    width: 130px;
-    min-width: 130px;
-    font-size: 0.78rem;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--color-sv-text-muted);
-  }
-  .row {
-    display: flex;
-    gap: 0.625rem;
-    align-items: center;
-    flex-wrap: wrap;
-  }
-
-  /* inputs */
+  /* Form primitives — used by both wizard and the chat-first UI. */
   input[type="text"],
   textarea {
-    flex: 1;
-    min-width: 0;
     background: var(--color-sv-bg);
     border: 1px solid var(--color-sv-border);
     color: var(--color-sv-text);
     padding: 0.5rem 0.7rem;
-    border-radius: 5px;
-    font-family: var(--font-mono);
-    font-size: 0.82rem;
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: 0.9rem;
     outline: none;
     transition: border-color 0.15s ease;
   }
@@ -249,32 +117,47 @@
   }
   textarea {
     min-height: 64px;
-    max-height: 240px;
     resize: vertical;
     width: 100%;
+    font-family: inherit;
   }
   input[readonly],
   textarea[readonly] {
     color: var(--color-sv-text-muted);
     background: var(--color-sv-surface);
   }
+  input[type="text"].sv-mono,
+  textarea.sv-mono,
+  code.sv-mono,
+  .sv-mono {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    direction: ltr;
+    unicode-bidi: embed;
+  }
 
-  /* buttons */
+  /* Buttons default to primary CTA; .secondary opts out to outline. */
   button {
     background: var(--color-sv-text);
     color: var(--color-sv-bg);
     border: 0;
     padding: 0.5rem 1rem;
-    border-radius: 5px;
+    border-radius: 6px;
     font-family: inherit;
     font-weight: 500;
-    font-size: 0.82rem;
+    font-size: 0.85rem;
     cursor: pointer;
     white-space: nowrap;
-    transition: opacity 0.12s ease;
+    transition:
+      opacity 0.12s ease,
+      background 0.12s ease;
   }
-  button:hover {
+  button:hover:not(:disabled) {
     opacity: 0.88;
+  }
+  button:focus-visible {
+    outline: 2px solid var(--color-sv-text);
+    outline-offset: 2px;
   }
   button:disabled {
     opacity: 0.35;
@@ -285,205 +168,88 @@
     color: var(--color-sv-text);
     border: 1px solid var(--color-sv-border);
   }
-  button.secondary:hover {
+  button.secondary:hover:not(:disabled) {
     background: var(--color-sv-surface);
     opacity: 1;
   }
 
-  /* status / error region */
-  .error {
-    margin: 0;
-    padding: 0.5rem 0;
-    color: var(--color-sv-text);
-    font-family: var(--font-mono);
-    font-size: 0.82rem;
-    min-height: 1.2em;
-    white-space: pre-wrap;
+  /* Presence dot (used in rail badges + friend rows). */
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+    flex: 0 0 auto;
   }
-  .error.ok {
-    color: var(--color-sv-text-muted);
+  .dot-idle {
+    background: var(--color-sv-silver-light);
   }
-  .error:not(:empty) {
-    border-top: 1px solid var(--color-sv-border);
-    padding-top: 0.75rem;
+  .dot-running {
+    background: var(--color-sv-ink);
   }
-
-  /* inbox list */
-  .inbox-list {
-    margin: 0;
-    padding: 0;
-    list-style: none;
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-  }
-  .inbox-list li {
-    background: var(--color-sv-bg);
-    border: 1px solid var(--color-sv-border);
-    border-radius: 5px;
-    padding: 0.625rem 0.875rem;
-  }
-  .inbox-list .from {
-    font-family: var(--font-mono);
-    font-size: 0.72rem;
-    color: var(--color-sv-text-muted);
-    margin-bottom: 0.25rem;
-  }
-  .inbox-list .body {
-    color: var(--color-sv-text);
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
-
-  /* QR display */
-  .qr-display {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-    padding: 0.875rem 0 0;
-  }
-  .qr-svg {
-    display: flex;
-    justify-content: center;
-    padding: 0.75rem;
-    background: var(--color-sv-snow);
-    border: 1px solid var(--color-sv-border);
-    border-radius: 6px;
-  }
-  .qr-svg svg {
-    max-width: 240px;
-    width: 100%;
-    height: auto;
-    display: block;
+  .dot-online {
+    background: #34c759;
   }
   @media (prefers-color-scheme: dark) {
-    .qr-svg {
+    .dot-running {
       background: var(--color-sv-snow);
     }
   }
+  .dark .dot-running {
+    background: var(--color-sv-snow);
+  }
 
-  /* hosted sides list (Phase 3.B multi-side) */
-  .sides-list {
+  /* Global toast — uses .error / .ok variant. */
+  .sv-toast {
+    position: fixed;
+    bottom: 1rem;
+    inset-inline-end: 1rem;
     margin: 0;
-    padding: 0;
-    list-style: none;
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
+    padding: 0.6rem 0.85rem;
+    background: var(--color-sv-text);
+    color: var(--color-sv-bg);
+    border-radius: 6px;
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    max-width: 28rem;
+    min-height: 0;
+    line-height: 1.4;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+    z-index: 90;
+    white-space: pre-wrap;
   }
-  .sides-list li {
-    background: var(--color-sv-bg);
-    border: 1px solid var(--color-sv-border);
-    border-radius: 5px;
-    padding: 0.625rem 0.875rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
+  .sv-toast:not(:empty) {
+    opacity: 1;
   }
-  .sides-list li.side-row {
-    cursor: pointer;
-    transition:
-      border-color 0.15s ease,
-      background 0.15s ease;
-  }
-  .sides-list li.side-row:hover {
-    border-color: var(--color-sv-text-muted);
-  }
-  .sides-list li.side-row:focus {
-    outline: none;
-    border-color: var(--color-sv-text);
-  }
-  .sides-list li.side-row-active {
-    border-color: var(--color-sv-text);
+  .sv-toast.ok {
     background: var(--color-sv-surface);
-  }
-  .sides-list .side-top {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.5rem;
-  }
-  .sides-list .side-label {
-    font-weight: 600;
-    font-size: 0.85rem;
     color: var(--color-sv-text);
-  }
-  .sides-list .side-state {
-    font-family: var(--font-mono);
-    font-size: 0.72rem;
-    color: var(--color-sv-text-muted);
-  }
-  .sides-list li.side-row-active .side-state {
-    color: var(--color-sv-text);
-  }
-  .sides-list .side-addr {
-    font-family: var(--font-mono);
-    font-size: 0.72rem;
-    color: var(--color-sv-text);
-    word-break: break-all;
-  }
-  .sides-list .side-listen {
-    font-family: var(--font-mono);
-    font-size: 0.72rem;
-    color: var(--color-sv-text-muted);
+    border: 1px solid var(--color-sv-border);
   }
 
-  /* lifecycle badge + retire button (Phase 3.C) */
-  .sides-list .side-badge {
-    font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 0.1rem 0.45rem;
-    border-radius: 3px;
-    border: 1px solid var(--color-sv-border);
-    color: var(--color-sv-text-muted);
-  }
-  .sides-list .lifecycle-active {
-    border-color: var(--color-sv-text);
-    color: var(--color-sv-text);
-  }
-  .sides-list .lifecycle-dormant {
-    border-color: var(--color-sv-silver-light);
-    color: var(--color-sv-text-muted);
-  }
-  .sides-list .lifecycle-retired {
-    border-color: var(--color-sv-text);
-    color: var(--color-sv-text);
-    background: var(--color-sv-surface);
-    text-decoration: line-through;
-  }
-  .sides-list .side-actions {
-    margin-top: 0.5rem;
-  }
-  .sides-list .side-retire {
-    font-size: 0.75rem;
-    padding: 0.25rem 0.6rem;
-  }
-
-  /* RTL overrides (Phase 3.H) */
+  /* RTL helpers — keep monospace identifier strings LTR even in RTL. */
   [dir="rtl"] body {
     font-family:
       "Geist", "Segoe UI", -apple-system, BlinkMacSystemFont, "Tajawal",
       system-ui, sans-serif;
   }
-  [dir="rtl"] .label {
-    text-align: right;
-  }
-  [dir="rtl"] input[type="text"],
-  [dir="rtl"] textarea {
-    direction: ltr;
-    text-align: right;
-  }
-  [dir="rtl"] .inbox-list .from,
-  [dir="rtl"] .sides-list .side-addr,
-  [dir="rtl"] .sides-list .side-listen,
-  [dir="rtl"] .sides-list .side-state {
+  [dir="rtl"] .sv-mono,
+  [dir="rtl"] code.sv-mono,
+  [dir="rtl"] input.sv-mono,
+  [dir="rtl"] textarea.sv-mono {
     direction: ltr;
     text-align: right;
     unicode-bidi: embed;
   }
+  [dir="rtl"] input[type="text"],
+  [dir="rtl"] textarea {
+    text-align: right;
+  }
 
-  /* onboarding overlay (Phase 3.D) */
+  /* ---- Onboarding overlay (Phase 3.D, unchanged) -------------------- */
   .onboarding {
     position: fixed;
     inset: 0;
@@ -516,6 +282,9 @@
     .onboarding-logo {
       filter: invert(1);
     }
+  }
+  .dark .onboarding-logo {
+    filter: invert(1);
   }
   .onboarding-stepper {
     list-style: none;
@@ -569,6 +338,30 @@
     color: var(--color-sv-text);
     font-weight: 600;
   }
+  .onboarding-screen .row {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+  }
+  .onboarding-screen .row input[type="text"] {
+    flex: 1;
+  }
+  .onboarding-screen .error {
+    margin: 0;
+    color: #d70015;
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    white-space: pre-wrap;
+  }
+  .onboarding-screen .error.ok {
+    color: var(--color-sv-text-muted);
+  }
+  .onboarding-screen .label {
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--color-sv-text-muted);
+  }
   .onboarding-actions {
     display: flex;
     justify-content: flex-end;
@@ -578,135 +371,624 @@
 }
 
 /* ---------------------------------------------------------------------
- * Stage B shell — sidebar + main pane.
+ * @layer components — Stage C chat-first shell.
  *
- * These are explicit component classes (not utility-only) because:
- *   - The @layer base ruleset above globally styles every <button>
- *     to look like a primary CTA (filled, dark bg). Sidebar nav
- *     items must override that without relying on inline-class order.
- *   - The shell is a stable component shape; sectional content uses
- *     Tailwind utilities directly. Putting just the shell in @layer
- *     components keeps utility classes free for the per-section work
- *     in Stage C.
+ * Three columns, left-to-right:
+ *   1. sv-rail       — far-left avatar rail (sides as social spaces)
+ *   2. sv-inside     — Friends + Chats list for the active side
+ *   3. sv-pane-main  — view router; renders chat thread / friend /
+ *                       settings / add-friend / etc.
+ *
+ * Logical properties (border-inline-*, margin-inline-*) so dir="rtl"
+ * mirrors the rail to the right edge.
  * --------------------------------------------------------------------- */
 @layer components {
-  /* App shell flex column — body owns the height. */
-  .sv-shell {
+  .sv-app {
     height: 100%;
-    display: flex;
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: 4rem 17rem 1fr;
+    grid-template-rows: 1fr;
     background: var(--color-sv-bg);
-  }
-  .sv-shell-row {
-    display: flex;
-    flex: 1 1 auto;
+    color: var(--color-sv-text);
     min-height: 0;
   }
 
-  /* Sidebar. Logical-property border so RTL automatically flips
-   * the divider to the other edge. */
-  .sv-sidebar {
-    width: 13.5rem;
-    flex: 0 0 auto;
+  /* ---- 1) Side rail ---------------------------------------------- */
+  .sv-rail {
+    grid-column: 1;
     border-inline-end: 1px solid var(--color-sv-border);
-    background: var(--color-sv-bg);
+    background: var(--color-sv-surface);
     display: flex;
     flex-direction: column;
-    overflow-y: auto;
-  }
-  .sv-sidebar-brand {
-    display: flex;
     align-items: center;
+    padding: 0.75rem 0;
     gap: 0.5rem;
-    padding: 0.875rem 1rem 0.75rem;
-    font-weight: 600;
-    font-size: 0.9rem;
-    letter-spacing: -0.01em;
-    color: var(--color-sv-text-strong);
+    overflow-y: auto;
+    overflow-x: hidden;
   }
-  .sv-sidebar-brand img {
-    height: 22px;
-    width: auto;
-  }
-  @media (prefers-color-scheme: dark) {
-    .sv-sidebar-brand img {
-      filter: invert(1);
-    }
-  }
-  .sv-nav {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    padding: 0.25rem 0.5rem 1rem;
+  .sv-rail-list {
     list-style: none;
     margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    width: 100%;
+    align-items: center;
+  }
+  .sv-rail-spacer {
+    flex: 1 1 auto;
+  }
+  .sv-rail-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    align-items: center;
+    padding-bottom: 0.25rem;
   }
 
-  /* Nav button — explicit override of @layer base button styling. */
-  .sv-nav-btn {
+  /* Rail buttons (avatars + icon buttons share this base). */
+  .sv-rail-btn {
     background: transparent;
     color: var(--color-sv-text-muted);
     border: 0;
-    width: 100%;
-    text-align: start;
+    padding: 0;
+    width: 2.6rem;
+    height: 2.6rem;
+    border-radius: 50%;
+    cursor: pointer;
     display: flex;
     align-items: center;
-    gap: 0.55rem;
-    padding: 0.5rem 0.65rem;
-    border-radius: 5px;
+    justify-content: center;
     font-family: inherit;
-    font-weight: 500;
-    font-size: 0.85rem;
-    cursor: pointer;
     transition:
       background 0.12s ease,
       color 0.12s ease;
-    white-space: nowrap;
+    position: relative;
   }
-  .sv-nav-btn:hover {
-    background: var(--color-sv-surface);
+  .sv-rail-btn:hover:not(:disabled) {
+    background: var(--color-sv-bg);
     color: var(--color-sv-text);
     opacity: 1;
   }
-  .sv-nav-btn:focus-visible {
+  .sv-rail-btn:focus-visible {
     outline: 2px solid var(--color-sv-text);
-    outline-offset: 1px;
+    outline-offset: 2px;
   }
-  .sv-nav-btn[data-active="true"] {
-    background: var(--color-sv-surface);
-    color: var(--color-sv-text-strong);
-  }
-  .sv-nav-btn svg {
-    width: 18px;
-    height: 18px;
-    flex: 0 0 auto;
+  .sv-rail-btn svg {
+    width: 22px;
+    height: 22px;
     stroke: currentColor;
     fill: none;
   }
 
-  /* Main pane. Override the @layer base `main { max-width: 980px }`
-   * because the pane is now flex-1 inside the shell row. We keep a
-   * sensible reading width via a child .sv-pane wrapper instead. */
-  .sv-main {
-    flex: 1 1 auto;
+  /* Avatars — circles with deterministic-color + initials. */
+  .sv-avatar {
+    width: 2.4rem;
+    height: 2.4rem;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 600;
+    font-size: 0.85rem;
+    color: var(--color-sv-snow);
+    letter-spacing: 0.02em;
+    user-select: none;
+    flex: 0 0 auto;
+    border: 2px solid transparent;
+    transition:
+      border-color 0.12s ease,
+      transform 0.12s ease;
+  }
+  .sv-avatar-sm {
+    width: 1.8rem;
+    height: 1.8rem;
+    font-size: 0.7rem;
+  }
+  .sv-avatar-lg {
+    width: 3rem;
+    height: 3rem;
+    font-size: 1rem;
+  }
+
+  /* Side-rail avatar variant: active sides get a brand-color ring. */
+  .sv-rail-avatar {
+    width: 2.4rem;
+    height: 2.4rem;
+  }
+  .sv-rail-btn[data-active="true"] .sv-rail-avatar {
+    border-color: var(--color-sv-text);
+  }
+  .sv-rail-btn[data-active="true"] {
+    background: var(--color-sv-bg);
+  }
+
+  /* Unread badge dot top-right of the avatar. */
+  .sv-rail-unread {
+    position: absolute;
+    top: 4px;
+    inset-inline-end: 4px;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--color-sv-text-strong);
+    border: 2px solid var(--color-sv-surface);
+  }
+
+  /* ---- 2) In-side column ---------------------------------------- */
+  .sv-inside {
+    grid-column: 2;
+    border-inline-end: 1px solid var(--color-sv-border);
+    display: flex;
+    flex-direction: column;
     overflow-y: auto;
-    padding: 1.25rem 1.5rem 2rem;
-    max-width: none;
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
+    overflow-x: hidden;
+    background: var(--color-sv-bg);
   }
-  .sv-pane {
+  .sv-inside-empty {
+    padding: 2rem 1.25rem;
+    color: var(--color-sv-text-muted);
+    font-size: 0.85rem;
+    text-align: center;
+  }
+  .sv-inside-header {
     display: flex;
     flex-direction: column;
-    gap: 1rem;
-    max-width: 880px;
+    gap: 0.25rem;
+    padding: 0.95rem 1rem 0.85rem;
+    border-bottom: 1px solid var(--color-sv-border);
+    position: sticky;
+    top: 0;
+    background: var(--color-sv-bg);
+    z-index: 1;
+  }
+  .sv-inside-title {
+    font-size: 1rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--color-sv-text-strong);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .sv-inside-stats {
+    font-size: 0.72rem;
+    color: var(--color-sv-text-muted);
+    font-family: var(--font-mono);
+  }
+  .sv-inside-section {
+    display: flex;
+    flex-direction: column;
+    border-bottom: 1px solid var(--color-sv-border);
+  }
+  .sv-inside-section:last-child {
+    border-bottom: 0;
+  }
+  .sv-inside-section h3 {
+    margin: 0;
+    padding: 0.95rem 1rem 0.4rem;
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--color-sv-text-muted);
+  }
+  .sv-inside-section-empty {
+    padding: 0.5rem 1rem 0.9rem;
+    color: var(--color-sv-text-muted);
+    font-size: 0.78rem;
+  }
+
+  /* Friend + chat rows share a base layout. */
+  .sv-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.5rem 1rem;
+    background: transparent;
+    border: 0;
+    color: inherit;
+    cursor: pointer;
+    text-align: start;
     width: 100%;
+    font-family: inherit;
+    font-size: 0.85rem;
+    border-radius: 0;
+    transition: background 0.12s ease;
   }
-  .sv-pane[hidden] {
+  .sv-row:hover {
+    background: var(--color-sv-surface);
+    opacity: 1;
+  }
+  .sv-row:focus-visible {
+    outline: 2px solid var(--color-sv-text);
+    outline-offset: -2px;
+  }
+  .sv-row[data-active="true"] {
+    background: var(--color-sv-surface);
+  }
+  .sv-row-body {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-width: 0;
+    gap: 0.15rem;
+  }
+  .sv-row-title {
+    color: var(--color-sv-text);
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .sv-row-sub {
+    font-size: 0.72rem;
+    color: var(--color-sv-text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .sv-row-meta {
+    font-size: 0.7rem;
+    color: var(--color-sv-text-muted);
+    flex: 0 0 auto;
+    margin-inline-start: auto;
+  }
+
+  /* "+ Add friend" inline button at end of Friends section. */
+  .sv-link-btn {
+    background: transparent;
+    color: var(--color-sv-text-muted);
+    border: 0;
+    padding: 0.5rem 1rem 0.9rem;
+    font-family: inherit;
+    font-size: 0.8rem;
+    font-weight: 500;
+    cursor: pointer;
+    text-align: start;
+    width: 100%;
+    transition: color 0.12s ease;
+  }
+  .sv-link-btn:hover {
+    color: var(--color-sv-text);
+    background: transparent;
+    opacity: 1;
+  }
+  .sv-link-btn:focus-visible {
+    outline: 2px solid var(--color-sv-text);
+    outline-offset: 2px;
+  }
+
+  /* ---- 3) Main pane (view router) ------------------------------- */
+  .sv-pane-main {
+    grid-column: 3;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-width: 0;
+    background: var(--color-sv-bg);
+  }
+  .sv-view {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    min-height: 0;
+  }
+  .sv-view[hidden] {
     display: none;
   }
-}
 
-/* End of Stage A/B bridge. Stage C deletes per-section .card rules
- * above as each section moves to Tailwind utilities. */
+  /* Empty/welcome state. */
+  .sv-empty {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.65rem;
+    color: var(--color-sv-text-muted);
+    padding: 2rem;
+    text-align: center;
+  }
+  .sv-empty h2 {
+    margin: 0;
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--color-sv-text-strong);
+    letter-spacing: -0.01em;
+  }
+  .sv-empty p {
+    margin: 0;
+    max-width: 28rem;
+    line-height: 1.55;
+  }
+  .sv-empty button {
+    margin-top: 0.5rem;
+  }
+
+  /* Chat thread (the main attraction). */
+  .sv-thread {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    padding: 1rem 1.25rem;
+    gap: 0.5rem;
+  }
+  .sv-thread-header {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    padding: 0.75rem 1.25rem;
+    border-bottom: 1px solid var(--color-sv-border);
+    background: var(--color-sv-bg);
+    flex: 0 0 auto;
+  }
+  .sv-thread-header-text {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .sv-thread-name {
+    font-weight: 600;
+    color: var(--color-sv-text-strong);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .sv-thread-sub {
+    font-size: 0.72rem;
+    color: var(--color-sv-text-muted);
+  }
+  .sv-thread-actions {
+    display: flex;
+    gap: 0.4rem;
+    align-items: center;
+  }
+
+  .sv-bubble {
+    max-width: 32rem;
+    padding: 0.55rem 0.85rem;
+    border-radius: 14px;
+    font-size: 0.9rem;
+    line-height: 1.45;
+    word-wrap: break-word;
+    white-space: pre-wrap;
+  }
+  .sv-bubble-sent {
+    align-self: flex-end;
+    background: var(--color-sv-text-strong);
+    color: var(--color-sv-bg);
+    border-bottom-right-radius: 4px;
+    margin-inline-start: auto;
+  }
+  .sv-bubble-received {
+    align-self: flex-start;
+    background: var(--color-sv-surface);
+    color: var(--color-sv-text);
+    border-bottom-left-radius: 4px;
+    margin-inline-end: auto;
+  }
+  .sv-bubble-meta {
+    font-size: 0.65rem;
+    color: var(--color-sv-text-muted);
+    margin: 0 0.25rem;
+    align-self: flex-end;
+  }
+  .sv-bubble-meta.received {
+    align-self: flex-start;
+  }
+
+  /* Compose row, anchored at thread bottom. */
+  .sv-compose {
+    flex: 0 0 auto;
+    display: flex;
+    gap: 0.5rem;
+    align-items: flex-end;
+    padding: 0.75rem 1.25rem;
+    border-top: 1px solid var(--color-sv-border);
+    background: var(--color-sv-bg);
+  }
+  .sv-compose textarea {
+    flex: 1 1 auto;
+    min-height: 2.5rem;
+    max-height: 8rem;
+    resize: none;
+  }
+
+  /* Generic form view (used by Add friend / Settings / etc.). */
+  .sv-form {
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+    padding: 1.25rem 1.5rem;
+    max-width: 36rem;
+    width: 100%;
+  }
+  .sv-form-section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--color-sv-border);
+  }
+  .sv-form-section:last-child {
+    border-bottom: 0;
+  }
+  .sv-form-title {
+    font-size: 0.92rem;
+    font-weight: 600;
+    color: var(--color-sv-text-strong);
+    margin: 0;
+  }
+  .sv-form-sub {
+    font-size: 0.78rem;
+    color: var(--color-sv-text-muted);
+    margin: 0 0 0.25rem;
+    line-height: 1.5;
+  }
+  .sv-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+  .sv-field-label {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--color-sv-text-muted);
+  }
+  .sv-field-row {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+  }
+  .sv-field-row input,
+  .sv-field-row textarea {
+    flex: 1 1 auto;
+  }
+
+  /* View headers (Friend / Side settings / etc.). */
+  .sv-view-header {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.95rem 1.25rem;
+    border-bottom: 1px solid var(--color-sv-border);
+    flex: 0 0 auto;
+  }
+  .sv-view-header h2 {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--color-sv-text-strong);
+    letter-spacing: -0.01em;
+    flex: 1 1 auto;
+  }
+
+  /* QR display block (Add friend → "Share me" tab). */
+  .sv-qr-block {
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+    padding: 0.75rem;
+    background: var(--color-sv-surface);
+    border: 1px solid var(--color-sv-border);
+    border-radius: 8px;
+  }
+  .sv-qr-svg {
+    display: flex;
+    justify-content: center;
+    padding: 0.85rem;
+    background: var(--color-sv-snow);
+    border: 1px solid var(--color-sv-border);
+    border-radius: 6px;
+  }
+  .sv-qr-svg svg {
+    width: 100%;
+    max-width: 220px;
+    height: auto;
+    display: block;
+  }
+
+  /* Inline pill-style tabs for "Share me" vs "Add by code". */
+  .sv-tabs {
+    display: flex;
+    gap: 0.25rem;
+    padding: 0.25rem;
+    background: var(--color-sv-surface);
+    border-radius: 8px;
+    border: 1px solid var(--color-sv-border);
+    align-self: flex-start;
+  }
+  .sv-tab {
+    background: transparent;
+    color: var(--color-sv-text-muted);
+    border: 0;
+    padding: 0.35rem 0.85rem;
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: 0.8rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.12s ease;
+  }
+  .sv-tab:hover {
+    color: var(--color-sv-text);
+    opacity: 1;
+  }
+  .sv-tab[data-active="true"] {
+    background: var(--color-sv-bg);
+    color: var(--color-sv-text-strong);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  }
+
+  /* Capability chips (used in profile / friend detail). */
+  .sv-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+  }
+  .sv-chip {
+    font-size: 0.7rem;
+    padding: 0.18rem 0.55rem;
+    border: 1px solid var(--color-sv-border);
+    border-radius: 999px;
+    color: var(--color-sv-text-muted);
+    font-family: var(--font-mono);
+    letter-spacing: 0.02em;
+    line-height: 1.4;
+  }
+
+  /* Side header at the top of the in-side column shows an avatar +
+   * label + clickable area for opening the side-settings view. */
+  .sv-inside-titlerow {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    cursor: pointer;
+  }
+  .sv-inside-titlerow:hover .sv-inside-title {
+    color: var(--color-sv-text);
+  }
+
+  /* Settings list (theme / language toggles etc.). */
+  .sv-setting-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.65rem 0;
+    border-bottom: 1px solid var(--color-sv-border);
+  }
+  .sv-setting-row:last-child {
+    border-bottom: 0;
+  }
+  .sv-setting-label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 0;
+  }
+  .sv-setting-name {
+    font-weight: 500;
+    color: var(--color-sv-text-strong);
+  }
+  .sv-setting-hint {
+    font-size: 0.72rem;
+    color: var(--color-sv-text-muted);
+    line-height: 1.4;
+  }
+  .sv-setting-row select {
+    background: var(--color-sv-bg);
+    color: var(--color-sv-text);
+    border: 1px solid var(--color-sv-border);
+    border-radius: 6px;
+    padding: 0.3rem 0.55rem;
+    font-family: inherit;
+    font-size: 0.85rem;
+  }
+}
