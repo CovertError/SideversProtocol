@@ -4,101 +4,171 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Sidevers</title>
+    <link rel="icon" type="image/png" href="logo.png" />
+    <!--
+      Phase 3.J: Geist + Geist Mono are loaded LOCALLY via @font-face in
+      style.css. The font files must be placed under `dist/fonts/`
+      before bundling — see `dist/fonts/README.md` for instructions.
+      If absent, the CSS font-family chain falls back to system
+      sans-serif so the app still renders. Loading via CDN would
+      violate the production CSP and break offline use.
+    -->
+    <link rel="stylesheet" href="brand-colors.css" />
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
-    <header>
-      <h1>Sidevers</h1>
-      <p class="subtitle">Reference desktop client — keygen, addresses, direct messages.</p>
+    <header class="topbar">
+      <img src="logo.png" alt="Sidevers" class="logo" />
+      <div class="topbar-right">
+        <select id="lang-switch" class="lang-switch" aria-label="Language">
+          <option value="en">English</option>
+          <option value="ar">العربية</option>
+        </select>
+        <div class="status" id="status">
+          <span class="dot dot-idle" id="status-dot"></span>
+          <span id="status-text" data-i18n="status.idle">No node started</span>
+        </div>
+      </div>
     </header>
 
     <main>
-      <section class="card" aria-labelledby="keys-h">
-        <h2 id="keys-h">1. Keys</h2>
-
+      <section class="card" aria-labelledby="node-h">
+        <h2 id="node-h" data-i18n="node.h">Node</h2>
+        <p class="muted" data-i18n="node.muted">
+          Start the embedded protocol node, then dial a peer.
+        </p>
         <div class="row">
-          <button id="gen-master">Generate master seed</button>
           <input
-            id="master-seed"
+            id="data-dir"
             type="text"
             spellcheck="false"
-            placeholder="master seed (hex, 32 bytes)"
+            data-i18n-placeholder="node.data_dir.placeholder"
+            placeholder="data directory (e.g. /tmp/sidevers-alice)"
           />
         </div>
-
         <div class="row">
           <input
             id="side-label"
             type="text"
             spellcheck="false"
-            placeholder="side label (e.g. &quot;work&quot;)"
+            data-i18n-placeholder="node.side_label.placeholder"
+            placeholder="primary side label (e.g. &quot;work&quot;)"
+            value="work"
           />
-          <button id="derive-side">Derive side seed</button>
+          <button id="start-node" data-i18n="btn.start_node">Start node</button>
+          <button id="stop-node" class="secondary" disabled data-i18n="btn.stop_node">
+            Stop node
+          </button>
+        </div>
+      </section>
+
+      <section class="card" aria-labelledby="sides-h">
+        <h2 id="sides-h">Hosted sides</h2>
+        <p class="muted">
+          Each side is an independent identity with its own QUIC endpoint
+          (spec §7.6). Click a side to make it active — Connect, Send,
+          and Pair below operate from the active side.
+        </p>
+        <ul id="sides-list" class="sides-list"></ul>
+        <div class="row">
           <input
-            id="side-seed"
+            id="extra-side-label"
             type="text"
             spellcheck="false"
-            placeholder="side seed (hex)"
+            placeholder="new side label (e.g. &quot;private&quot;)"
           />
+          <button id="add-side" disabled>Add side</button>
+          <button id="refresh-sides" class="secondary" disabled>Refresh</button>
         </div>
+      </section>
 
+      <section class="card" aria-labelledby="peer-h">
+        <h2 id="peer-h">Dial peer</h2>
+        <p class="muted">
+          Connect to another node by network address, from the active
+          hosted side.
+        </p>
         <div class="row">
-          <button id="compute-pubkey">Compute pubkey</button>
+          <label class="label">Connect from</label>
+          <input id="connect-from-side" type="text" spellcheck="false" readonly />
+        </div>
+        <div class="row">
           <input
-            id="pubkey"
+            id="peer-addr"
             type="text"
             spellcheck="false"
-            placeholder="pubkey (hex, 32 bytes)"
+            placeholder="peer listen addr (e.g. 127.0.0.1:50001)"
           />
+          <button id="connect-peer" disabled>Connect</button>
         </div>
-
         <div class="row">
-          <button id="encode-side-addr">Encode as side address</button>
-          <button id="encode-verse-addr" class="secondary">Encode as verse address</button>
-          <input id="address" type="text" spellcheck="false" readonly placeholder="bech32m address" />
+          <label class="label">Connected peer</label>
+          <input id="peer-side" type="text" spellcheck="false" readonly />
         </div>
       </section>
 
       <section class="card" aria-labelledby="send-h">
-        <h2 id="send-h">2. Send DM</h2>
-        <input
-          id="send-sender"
-          type="text"
-          spellcheck="false"
-          placeholder="sender side seed (hex)"
-        />
-        <input
-          id="send-recipient"
-          type="text"
-          spellcheck="false"
-          placeholder="recipient pubkey (hex, 32 bytes)"
-        />
-        <textarea id="send-text" placeholder="message text"></textarea>
+        <h2 id="send-h">Send a DM</h2>
+        <p class="muted">
+          Sent over the active side's open session to its connected peer.
+        </p>
+        <textarea id="dm-text" placeholder="message…"></textarea>
         <div class="row">
-          <button id="seal-dm">Seal DM</button>
-          <button id="copy-wire" class="secondary">Copy wire bytes</button>
+          <button id="send-dm" disabled>Send</button>
         </div>
-        <textarea id="wire" readonly placeholder="wire bytes (hex)"></textarea>
       </section>
 
-      <section class="card" aria-labelledby="open-h">
-        <h2 id="open-h">3. Open DM</h2>
-        <input
-          id="recv-recipient"
-          type="text"
-          spellcheck="false"
-          placeholder="recipient side seed (hex)"
-        />
-        <textarea id="recv-wire" placeholder="wire bytes (hex)"></textarea>
+      <section class="card" aria-labelledby="inbox-h">
+        <h2 id="inbox-h">Inbox</h2>
+        <p class="muted">DMs arriving on this node, newest first.</p>
+        <ul id="inbox" class="inbox-list"></ul>
+      </section>
+
+      <section class="card" aria-labelledby="pair-show-h">
+        <h2 id="pair-show-h">Pair another device</h2>
+        <p class="muted">
+          Generate a QR for the active side. Show it on the existing
+          device — a new device scans it (or pastes the URI below) to
+          install this side and become a co-holder. The QR carries a
+          one-time nonce valid for 10 minutes.
+        </p>
         <div class="row">
-          <button id="open-dm">Open DM</button>
+          <label class="label">Pair from side</label>
+          <input id="pair-from-side" type="text" spellcheck="false" readonly />
         </div>
-        <textarea id="plaintext" readonly placeholder="plaintext"></textarea>
+        <div class="row">
+          <button id="gen-qr" disabled>Generate pairing QR</button>
+        </div>
+        <div id="qr-display" class="qr-display" hidden>
+          <div id="qr-svg" class="qr-svg"></div>
+          <label class="label">URI (paste this into the other device)</label>
+          <textarea id="qr-uri" readonly></textarea>
+        </div>
+      </section>
+
+      <section class="card" aria-labelledby="pair-accept-h">
+        <h2 id="pair-accept-h">Pair this device</h2>
+        <p class="muted">
+          On the new device: paste the URI from the existing device's QR
+          to install its side here.
+        </p>
+        <textarea
+          id="accept-uri"
+          placeholder="sidevers-pair:1:..."
+        ></textarea>
+        <div class="row">
+          <button id="accept-qr" disabled>Accept pairing</button>
+        </div>
       </section>
 
       <pre id="error" class="error" role="alert"></pre>
     </main>
 
+    <!-- Phase 3.H: i18n shim loads as a module so it can fetch JSON
+         bundles + own its own state. main.js is plain-script for
+         simplicity; it talks to i18n.js via window.__sv_i18n set by
+         the module. -->
+    <script type="module" src="i18n.js"></script>
     <script src="main.js"></script>
   </body>
 </html>

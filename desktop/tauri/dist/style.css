@@ -1,14 +1,40 @@
-:root {
-  --bg: #0f1115;
-  --panel: #181b22;
-  --panel-2: #11141a;
-  --border: #2a2f3a;
-  --accent: #7aa2f7;
-  --accent-hover: #9bb8f8;
-  --text: #e6e8ee;
-  --muted: #8a92a5;
-  --error: #f7768e;
-  --ok: #9ece6a;
+/* Sidevers brand-grounded styles. Six grays + Geist typography per the
+   Sidevers brand-docs (no blues, no accents).
+   Brand tokens come from brand-colors.css. */
+
+/* Phase 3.J: local @font-face declarations. Files MUST be placed under
+   `dist/fonts/` for branded typography to render — see fonts/README.md.
+   If files are absent, browsers fall through to the font-family stack
+   on body (system sans-serif), so the app remains functional offline
+   with no CSP allowlisting. The `font-display: swap` makes that
+   degradation invisible to the user. */
+@font-face {
+  font-family: "Geist";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/Geist-Regular.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Geist";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/Geist-Medium.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Geist";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/Geist-SemiBold.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Geist Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/GeistMono-Regular.woff2") format("woff2");
 }
 
 * {
@@ -20,35 +46,115 @@ body {
   margin: 0;
   padding: 0;
   height: 100%;
-  background: var(--bg);
-  color: var(--text);
+  background: var(--sv-background);
+  color: var(--sv-text);
   font-family:
-    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui,
+    "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui,
     sans-serif;
   font-size: 14px;
-  line-height: 1.4;
+  line-height: 1.5;
+  font-feature-settings: "ss01", "ss02";
 }
 
-header {
-  padding: 1.25rem 1.75rem 1rem;
-  border-bottom: 1px solid var(--border);
-  background: var(--panel-2);
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.875rem 1.5rem;
+  border-bottom: 1px solid var(--sv-border);
+  background: var(--sv-background);
 }
 
-header h1 {
-  margin: 0;
-  font-size: 1.35rem;
-  letter-spacing: 0.02em;
+/* Phase 3.H i18n: language switcher in the topbar, plus the wrapper
+   that holds it next to the status indicator. */
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
 }
 
-.subtitle {
-  margin: 0.25rem 0 0;
-  color: var(--muted);
-  font-size: 0.9rem;
+.lang-switch {
+  background: var(--sv-background);
+  color: var(--sv-text);
+  border: 1px solid var(--sv-border);
+  border-radius: 5px;
+  padding: 0.25rem 0.5rem;
+  font-family: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+/* Phase 3.H RTL overrides. Most of the layout is flexbox + percentage
+   widths so it mirrors automatically when `<html dir="rtl">` flips.
+   These rules cover the few cases where direction-specific spacing
+   or alignment needs an explicit flip. */
+[dir="rtl"] body {
+  font-family:
+    "Geist", "Segoe UI", -apple-system, BlinkMacSystemFont, "Tajawal",
+    system-ui, sans-serif;
+}
+
+[dir="rtl"] .label {
+  text-align: right;
+}
+
+[dir="rtl"] input[type="text"],
+[dir="rtl"] textarea {
+  direction: ltr;
+  text-align: right;
+}
+
+[dir="rtl"] .inbox-list .from,
+[dir="rtl"] .sides-list .side-addr,
+[dir="rtl"] .sides-list .side-listen,
+[dir="rtl"] .sides-list .side-state {
+  direction: ltr;
+  text-align: right;
+  unicode-bidi: embed;
+}
+
+.logo {
+  height: 28px;
+  width: auto;
+}
+
+@media (prefers-color-scheme: dark) {
+  .logo {
+    filter: invert(1);
+  }
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+  color: var(--sv-text-muted);
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.dot-idle {
+  background: var(--sv-silver-light);
+}
+
+.dot-running {
+  background: var(--sv-ink);
+}
+
+@media (prefers-color-scheme: dark) {
+  .dot-running {
+    background: var(--sv-snow);
+  }
 }
 
 main {
-  padding: 1.25rem 1.75rem 2rem;
+  padding: 1.25rem 1.5rem 2rem;
   display: flex;
   flex-direction: column;
   gap: 1rem;
@@ -56,27 +162,41 @@ main {
 }
 
 .card {
-  background: var(--panel);
-  border: 1px solid var(--border);
+  background: var(--sv-surface);
+  border: 1px solid var(--sv-border);
   border-radius: 8px;
   padding: 1rem 1.25rem 1.25rem;
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: 0.625rem;
 }
 
 .card h2 {
-  margin: 0 0 0.5rem;
+  margin: 0;
   font-size: 0.95rem;
   font-weight: 600;
-  color: var(--muted);
+  letter-spacing: -0.01em;
+  color: var(--sv-text);
+}
+
+.muted {
+  margin: 0 0 0.25rem;
+  color: var(--sv-text-muted);
+  font-size: 0.85rem;
+}
+
+.label {
+  width: 130px;
+  min-width: 130px;
+  font-size: 0.78rem;
   text-transform: uppercase;
   letter-spacing: 0.06em;
+  color: var(--sv-text-muted);
 }
 
 .row {
   display: flex;
-  gap: 0.5rem;
+  gap: 0.625rem;
   align-items: center;
   flex-wrap: wrap;
 }
@@ -85,12 +205,12 @@ input[type="text"],
 textarea {
   flex: 1;
   min-width: 0;
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-  color: var(--text);
+  background: var(--sv-background);
+  border: 1px solid var(--sv-border);
+  color: var(--sv-text);
   padding: 0.5rem 0.7rem;
   border-radius: 5px;
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-family: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   font-size: 0.82rem;
   outline: none;
   transition: border-color 0.15s ease;
@@ -98,7 +218,7 @@ textarea {
 
 input[type="text"]:focus,
 textarea:focus {
-  border-color: var(--accent);
+  border-color: var(--sv-text);
 }
 
 textarea {
@@ -110,47 +230,234 @@ textarea {
 
 input[readonly],
 textarea[readonly] {
-  color: var(--muted);
-  background: #0c0e13;
+  color: var(--sv-text-muted);
+  background: var(--sv-surface);
 }
 
 button {
-  background: var(--accent);
-  color: #0f1115;
+  background: var(--sv-text);
+  color: var(--sv-background);
   border: 0;
-  padding: 0.5rem 0.95rem;
+  padding: 0.5rem 1rem;
   border-radius: 5px;
-  font-weight: 600;
+  font-family: inherit;
+  font-weight: 500;
   font-size: 0.82rem;
   cursor: pointer;
   white-space: nowrap;
-  transition: background 0.12s ease;
+  transition: opacity 0.12s ease;
 }
 
 button:hover {
-  background: var(--accent-hover);
+  opacity: 0.88;
+}
+
+button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
 }
 
 button.secondary {
   background: transparent;
-  color: var(--accent);
-  border: 1px solid var(--accent);
+  color: var(--sv-text);
+  border: 1px solid var(--sv-border);
 }
 
 button.secondary:hover {
-  background: rgba(122, 162, 247, 0.12);
+  background: var(--sv-surface);
+  opacity: 1;
 }
 
 .error {
   margin: 0;
-  padding: 0 0.25rem;
-  color: var(--error);
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  padding: 0.5rem 0;
+  color: var(--sv-text);
+  font-family: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   font-size: 0.82rem;
   min-height: 1.2em;
   white-space: pre-wrap;
 }
 
 .error.ok {
-  color: var(--ok);
+  color: var(--sv-text-muted);
+}
+
+.error:not(:empty) {
+  border-top: 1px solid var(--sv-border);
+  padding-top: 0.75rem;
+}
+
+.inbox-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.inbox-list li {
+  background: var(--sv-background);
+  border: 1px solid var(--sv-border);
+  border-radius: 5px;
+  padding: 0.625rem 0.875rem;
+}
+
+.inbox-list .from {
+  font-family: "Geist Mono", ui-monospace, monospace;
+  font-size: 0.72rem;
+  color: var(--sv-text-muted);
+  margin-bottom: 0.25rem;
+}
+
+.inbox-list .body {
+  color: var(--sv-text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Pairing QR */
+.qr-display {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.875rem 0 0;
+}
+
+.qr-svg {
+  display: flex;
+  justify-content: center;
+  padding: 0.75rem;
+  background: var(--sv-snow);
+  border: 1px solid var(--sv-border);
+  border-radius: 6px;
+}
+
+.qr-svg svg {
+  max-width: 240px;
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+@media (prefers-color-scheme: dark) {
+  /* Keep the QR on a white background even in dark mode — most camera
+     scanners assume dark modules on a light field. */
+  .qr-svg {
+    background: var(--sv-snow);
+  }
+}
+
+/* Hosted sides list (Phase 3.B multi-side surface) */
+.sides-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.sides-list li {
+  background: var(--sv-background);
+  border: 1px solid var(--sv-border);
+  border-radius: 5px;
+  padding: 0.625rem 0.875rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.sides-list li.side-row {
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease;
+}
+
+.sides-list li.side-row:hover {
+  border-color: var(--sv-text-muted);
+}
+
+.sides-list li.side-row:focus {
+  outline: none;
+  border-color: var(--sv-text);
+}
+
+.sides-list li.side-row-active {
+  border-color: var(--sv-text);
+  background: var(--sv-surface);
+}
+
+.sides-list .side-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.sides-list .side-label {
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: var(--sv-text);
+}
+
+.sides-list .side-state {
+  font-family: "Geist Mono", ui-monospace, monospace;
+  font-size: 0.72rem;
+  color: var(--sv-text-muted);
+}
+
+.sides-list li.side-row-active .side-state {
+  color: var(--sv-text);
+}
+
+.sides-list .side-addr {
+  font-family: "Geist Mono", ui-monospace, monospace;
+  font-size: 0.72rem;
+  color: var(--sv-text);
+  word-break: break-all;
+}
+
+.sides-list .side-listen {
+  font-family: "Geist Mono", ui-monospace, monospace;
+  font-size: 0.72rem;
+  color: var(--sv-text-muted);
+}
+
+/* Phase 3.C lifecycle badge + retire button. */
+.sides-list .side-badge {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.1rem 0.45rem;
+  border-radius: 3px;
+  border: 1px solid var(--sv-border);
+  color: var(--sv-text-muted);
+}
+
+.sides-list .lifecycle-active {
+  border-color: var(--sv-text);
+  color: var(--sv-text);
+}
+
+.sides-list .lifecycle-dormant {
+  border-color: var(--sv-silver-light);
+  color: var(--sv-text-muted);
+}
+
+.sides-list .lifecycle-retired {
+  border-color: var(--sv-text);
+  color: var(--sv-text);
+  background: var(--sv-surface);
+  text-decoration: line-through;
+}
+
+.sides-list .side-actions {
+  margin-top: 0.5rem;
+}
+
+.sides-list .side-retire {
+  font-size: 0.75rem;
+  padding: 0.25rem 0.6rem;
 }
