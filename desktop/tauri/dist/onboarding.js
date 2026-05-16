@@ -141,16 +141,24 @@
           backupFn.value = `${label}-seed.bin`;
           backupFn.dispatchEvent(new Event("input"));
         }
-        // Persist last_active_side so the chat shell renders the new
-        // side as the active rail avatar on first boot.
+        // Persist last_active_side + personal_side_address so the chat
+        // shell knows (a) which side to activate on boot and (b) which
+        // side is the user's implicit "home" / DM hub. The personal
+        // side never appears as a rail avatar — Home button at the
+        // top of the rail represents it instead.
         try {
           await invoke("set_setting", {
             dataDir: state.dataDir,
             key: "last_active_side",
             value: info.side_address,
           });
+          await invoke("set_setting", {
+            dataDir: state.dataDir,
+            key: "personal_side_address",
+            value: info.side_address,
+          });
         } catch (e) {
-          console.warn("set last_active_side failed:", e);
+          console.warn("set last_active_side / personal_side_address failed:", e);
         }
         showStep(4);
       } catch (e) {

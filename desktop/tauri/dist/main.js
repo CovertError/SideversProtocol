@@ -48,6 +48,11 @@ const state = {
   // sidePhotoUrls : Map<sideAddress, Tauri-converted-file-url> for the
   // local-only profile photo per side. None means initials fallback.
   sidePhotoUrls: new Map(),
+  // personalSideAddress : bech32 of the user's implicit "Home" side.
+  // The personal side never appears as a rail avatar — it's
+  // represented by the Home button at the top of the rail. Friends
+  // and 1:1 DMs live here. Stage D L1.5.
+  personalSideAddress: null,
   view: { name: "welcome", params: {} },
   // Add-friend tab state
   addFriendTab: "share",
@@ -299,6 +304,7 @@ window.svBoot = async function svBoot(nodeInfo, dataDir) {
   applyAdvanced(state.advancedMode);
 
   await refreshSides();
+  await ensurePersonalSideAddress();
   // Best-effort prefetch of every side's photo so rail + inside-header
   // paint with the right avatar on the first render.
   await Promise.all(state.sides.map((s) => refreshSidePhoto(s.side_address)));
@@ -331,6 +337,27 @@ async function loadSettings() {
       state.theme = theme;
     }
   } catch {}
+  try {
+    const p = await call("get_setting", {
+      dataDir: state.dataDir,
+      key: "personal_side_address",
+    });
+    if (p) state.personalSideAddress = p;
+  } catch {}
+}
+
+// Migration: pre-L1.5 installs never wrote personal_side_address. Pick
+// the only hosted side (or the active one if multiple) and persist it.
+// Called once after refreshSides on boot.
+async function ensurePersonalSideAddress() {
+  if (state.personalSideAddress) return;
+  if (state.sides.length === 0) return;
+  const chosen =
+    state.sides.find((s) => s.side_address === state.activeSide) ||
+    state.sides.find((s) => !s.is_retired) ||
+    state.sides[0];
+  state.personalSideAddress = chosen.side_address;
+  await saveSetting("personal_side_address", chosen.side_address);
 }
 
 async function saveSetting(key, value) {
@@ -400,10 +427,38 @@ function renderRail() {
   const ul = $("side-rail");
   if (!ul) return;
   ul.innerHTML = "";
-  // Hide retired sides from the rail. The Rust side keeps them hosted
-  // (lifecycle: Retired) so any in-flight replies can still arrive, but
-  // they shouldn't appear as a switchable identity in the UI.
-  const visible = state.sides.filter((s) => !s.is_retired);
+
+  // ---- Home button (always at top, represents the personal side) ----
+  // The personal side is implicit — friends + 1:1 DMs live here, and
+  // the user doesn't think of it as a "side" they manage. Stage D
+  // Layer 2 adds group avatars below this; standalone non-personal
+  // sides live in Advanced and are not surfaced on the rail.
+  if (state.personalSideAddress) {
+    const homeLi = document.createElement("li");
+    const homeBtn = document.createElement("button");
+    homeBtn.className = "sv-rail-btn";
+    homeBtn.setAttribute("aria-label", t("rail.home_aria") || "Home");
+    homeBtn.title = t("rail.home_title") || "Home — friends and DMs";
+    if (state.activeSide === state.personalSideAddress) {
+      homeBtn.setAttribute("data-active", "true");
+    }
+    homeBtn.innerHTML =
+      '<svg viewBox="0 0 24 24" stroke-width="1.7" aria-hidden="true">' +
+      '<path stroke-linecap="round" stroke-linejoin="round" ' +
+      'd="m2.25 12 8.954-8.955c.44-.439 1.152-.439 1.591 0L21.75 12M4.5 9.75v10.125c0 .621.504 1.125 1.125 1.125H9.75v-4.875c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21h4.125c.621 0 1.125-.504 1.125-1.125V9.75M8.25 21h8.25"/>' +
+      "</svg>";
+    homeBtn.onclick = () => setActiveSide(state.personalSideAddress);
+    homeLi.appendChild(homeBtn);
+    ul.appendChild(homeLi);
+  }
+
+  // ---- Group + extra sides (everything that is NOT the personal side) ----
+  // Hide retired sides too — the Rust side keeps them hosted (lifecycle:
+  // Retired) so in-flight replies still arrive, but they shouldn't
+  // appear as a switchable identity.
+  const visible = state.sides.filter(
+    (s) => !s.is_retired && s.side_address !== state.personalSideAddress,
+  );
   for (const s of visible) {
     const li = document.createElement("li");
     const btn = document.createElement("button");
@@ -416,11 +471,6 @@ function renderRail() {
     av.className = "sv-avatar sv-rail-avatar";
     applyAvatar(av, s.side_address, sideLabel(s.side_address));
     btn.appendChild(av);
-
-    // Unread badge — derived from inbox events received since the user
-    // last opened a chat with this side. Stub for now: only show when
-    // there's an unread map entry; full presence is Stage C8.
-    // (Reserved DOM; render no badge yet.)
 
     btn.onclick = () => setActiveSide(s.side_address);
     li.appendChild(btn);
@@ -484,8 +534,14 @@ function renderInside() {
     return;
   }
 
+  // Personal side surfaces as "Home" / friends-and-DMs; group/extra
+  // sides surface under their own label. Stage D L1.5.
+  const isPersonal = state.activeSide === state.personalSideAddress;
   const label = sideLabel(state.activeSide) || shortenAddr(state.activeSide);
-  if (titleEl) titleEl.textContent = label;
+  const headerTitle = isPersonal
+    ? t("inside.home_title") || "Friends"
+    : label;
+  if (titleEl) titleEl.textContent = headerTitle;
   if (avatarEl) applyAvatar(avatarEl, state.activeSide, label);
 
   const friends = state.friends.get(state.activeSide) || [];
@@ -958,6 +1014,23 @@ async function renderSideSettings() {
     $("side-listen").value = side.listen_addr;
     $("side-lifecycle").value = side.lifecycle || "—";
   }
+
+  // Stage D L1.5: reframe the side-settings view when the active side
+  // is the implicit personal one. Personal = "My profile" (no retire,
+  // no protocol-info clutter unless advanced mode is on). Other sides
+  // = "Side settings" (full surface).
+  const isPersonal = state.activeSide === state.personalSideAddress;
+  const titleEl = $("side-settings-title");
+  if (titleEl) {
+    titleEl.textContent = isPersonal
+      ? t("my_profile.h") || "My profile"
+      : t("side_settings.h") || "Side settings";
+  }
+  const protoSection = $("side-settings-protocol-section");
+  if (protoSection) protoSection.hidden = isPersonal && !state.advancedMode;
+  const dangerSection = $("side-settings-danger-section");
+  if (dangerSection) dangerSection.hidden = isPersonal;
+
   // Photo preview reflects the current cached avatar (initials or
   // image). applyAvatar handles either case based on sidePhotoUrls.
   const preview = $("side-photo-preview");
