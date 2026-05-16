@@ -30,5 +30,9 @@ pub use messages::device::{
     RelationshipRecord, STATE_BUNDLE_AAD, StateBundleInner, StateBundlePayload, StateDeltaPayload,
 };
 pub use messages::profile::{ProfilePayload, capability};
+pub use messages::public::{
+    AnnouncementPayload, DirectoryEntryPayload, HandleAttestPayload, HandleResolvePayload,
+    PageDeliverPayload, PageFetchPayload, PagePublishPayload,
+};
 pub use messages::retirement::SideRetirementPayload;
 pub use messages::storage_prefs::StoragePreferences;

@@ -219,5 +219,56 @@ test = false
 doc = false
 bench = false
 
+# ---- Phase 2 wire scaffold: public-layer decoders ----
+
+[[bin]]
+name = "handle_resolve_decode"
+path = "fuzz_targets/handle_resolve_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "handle_attest_decode"
+path = "fuzz_targets/handle_attest_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "page_publish_decode"
+path = "fuzz_targets/page_publish_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "page_fetch_decode"
+path = "fuzz_targets/page_fetch_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "page_deliver_decode"
+path = "fuzz_targets/page_deliver_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "announcement_decode"
+path = "fuzz_targets/announcement_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "directory_entry_decode"
+path = "fuzz_targets/directory_entry_decode.rs"
+test = false
+doc = false
+bench = false
+
 [profile.release]
 debug = 1

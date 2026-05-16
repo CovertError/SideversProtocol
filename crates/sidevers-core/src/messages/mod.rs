@@ -15,6 +15,7 @@ pub mod forward;
 pub mod handshake;
 pub mod peer;
 pub mod profile;
+pub mod public;
 pub mod rendezvous;
 pub mod retirement;
 pub mod storage_prefs;

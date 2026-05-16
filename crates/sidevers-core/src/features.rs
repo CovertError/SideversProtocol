@@ -162,6 +162,17 @@ pub fn phase1_baseline() -> FeatureRegistry {
         ("verse.post", FeatureState::Active),
         ("verse.amend", FeatureState::Active),
         ("verse.reconsent", FeatureState::Active),
+        // Public layer (§9 — Phase 2 wire scaffold). The Rust node ships
+        // payload codecs but no dispatch handlers; full semantics live
+        // in the sidevers.com Laravel registry. Listed here so a
+        // capability-negotiating peer can see we speak v1 of each.
+        ("public.handle_resolve", FeatureState::Active),
+        ("public.handle_attest", FeatureState::Active),
+        ("public.page_publish", FeatureState::Active),
+        ("public.page_fetch", FeatureState::Active),
+        ("public.page_deliver", FeatureState::Active),
+        ("public.announcement", FeatureState::Active),
+        ("public.directory_entry", FeatureState::Active),
     ])
 }
 
