@@ -339,6 +339,146 @@ function renderSides() {
   }
 }
 
+// ---- Phase 3.C: profile + contacts -------------------------------------
+
+$("profile-load").onclick = () =>
+  safe(async () => {
+    if (!activeSide) throw new Error("pick an active side first");
+    const p = await call("get_profile", { sideAddress: activeSide });
+    if (!p) {
+      $("profile-name").value = "";
+      $("profile-bio").value = "";
+      $("profile-caps").value = "";
+      showOk("no profile yet for this side");
+      return;
+    }
+    $("profile-name").value = p.name || "";
+    $("profile-bio").value = p.bio || "";
+    $("profile-caps").value = (p.capabilities || []).join(", ");
+    showOk(`profile loaded · ${p.capabilities?.length || 0} caps`);
+  });
+
+$("profile-save").onclick = () =>
+  safe(async () => {
+    if (!activeSide) throw new Error("pick an active side first");
+    const name = $("profile-name").value.trim() || null;
+    const bio = $("profile-bio").value.trim() || null;
+    const capsRaw = $("profile-caps").value.trim();
+    const capabilities = capsRaw
+      ? capsRaw.split(",").map((s) => s.trim()).filter(Boolean)
+      : [];
+    await call("set_profile", {
+      sideAddress: activeSide,
+      name,
+      bio,
+      capabilities,
+    });
+    showOk("profile signed + published");
+  });
+
+$("contact-add").onclick = () =>
+  safe(async () => {
+    if (!activeSide) throw new Error("pick an active side first");
+    const peerAddress = require($("contact-addr").value, "contact address");
+    const nickname = $("contact-nick").value.trim() || null;
+    const capsRaw = $("contact-caps").value.trim();
+    const capabilities = capsRaw
+      ? capsRaw.split(",").map((s) => s.trim()).filter(Boolean)
+      : [];
+    await call("add_relationship_cmd", {
+      sideAddress: activeSide,
+      peerAddress,
+      nickname,
+      capabilities,
+    });
+    $("contact-addr").value = "";
+    $("contact-nick").value = "";
+    await refreshContacts();
+    showOk(`contact added · ${shortenAddr(peerAddress)}`);
+  });
+
+async function refreshContacts() {
+  if (!activeSide) return;
+  let rows = [];
+  try {
+    rows = await call("list_relationships", { sideAddress: activeSide });
+  } catch (e) {
+    console.warn("list_relationships failed:", e);
+    return;
+  }
+  const ul = $("contacts-list");
+  ul.innerHTML = "";
+  if (rows.length === 0) {
+    const li = document.createElement("li");
+    li.className = "muted";
+    li.textContent = "No contacts yet for this side.";
+    ul.appendChild(li);
+    return;
+  }
+  for (const r of rows) {
+    const li = document.createElement("li");
+    li.className = "side-row";
+    const top = document.createElement("div");
+    top.className = "side-top";
+    const tag = document.createElement("span");
+    tag.className = "side-label";
+    tag.textContent = r.nickname || "(unnamed)";
+    const caps = document.createElement("span");
+    caps.className = "side-state";
+    caps.textContent = (r.capabilities || []).join(" · ");
+    top.appendChild(tag);
+    top.appendChild(caps);
+    const a = document.createElement("div");
+    a.className = "side-addr";
+    a.textContent = r.address;
+    li.appendChild(top);
+    li.appendChild(a);
+    const actions = document.createElement("div");
+    actions.className = "side-actions";
+    const rm = document.createElement("button");
+    rm.className = "secondary side-retire";
+    rm.textContent = "Remove";
+    rm.onclick = (e) => {
+      e.stopPropagation();
+      safe(async () => {
+        await call("remove_relationship_cmd", {
+          sideAddress: activeSide,
+          peerAddress: r.address,
+        });
+        await refreshContacts();
+        showOk(`removed ${shortenAddr(r.address)}`);
+      });
+    };
+    actions.appendChild(rm);
+    li.appendChild(actions);
+    ul.appendChild(li);
+  }
+}
+
+// When the active side changes, refresh profile + contacts views to
+// match. setActiveSide is defined above; wrap it to fire this on change.
+const __origSetActiveSide = setActiveSide;
+setActiveSide = function (addr) {
+  __origSetActiveSide(addr);
+  if (!addr) {
+    $("profile-name").value = "";
+    $("profile-bio").value = "";
+    $("profile-caps").value = "";
+    $("contacts-list").innerHTML = "";
+    return;
+  }
+  // Best-effort prefill — don't block on errors.
+  call("get_profile", { sideAddress: addr })
+    .then((p) => {
+      if (!p) return;
+      $("profile-name").value = p.name || "";
+      $("profile-bio").value = p.bio || "";
+      $("profile-caps").value = (p.capabilities || []).join(", ");
+    })
+    .catch(() => {});
+  refreshContacts();
+};
+
 // ---- Boot diagnostics -------------------------------------------------
 
 if (!invoke) {

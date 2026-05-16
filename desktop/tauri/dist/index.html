@@ -248,6 +248,79 @@
         <ul id="inbox" class="inbox-list"></ul>
       </section>
 
+      <section class="card" aria-labelledby="profile-h">
+        <h2 id="profile-h" data-i18n="profile.h">Profile</h2>
+        <p class="muted" data-i18n="profile.muted">
+          Per-side profile (§7.3). Published to peers who fetch it,
+          and consulted by them to gate which message types they'll
+          send to you (§7.7 capability tokens). Edits below sign +
+          publish under the active side.
+        </p>
+        <div class="row">
+          <label class="label" data-i18n="profile.name_label">Display name</label>
+          <input id="profile-name" type="text" spellcheck="false" />
+        </div>
+        <div class="row">
+          <label class="label" data-i18n="profile.bio_label">Bio</label>
+          <textarea id="profile-bio"></textarea>
+        </div>
+        <div class="row">
+          <label class="label" data-i18n="profile.caps_label">Capabilities</label>
+          <input
+            id="profile-caps"
+            type="text"
+            spellcheck="false"
+            data-i18n-placeholder="profile.caps_placeholder"
+            placeholder="direct-message, storage-host, verse-host (comma-separated)"
+          />
+        </div>
+        <div class="row">
+          <button id="profile-load" class="secondary" data-i18n="btn.profile_load">
+            Reload from store
+          </button>
+          <button id="profile-save" data-i18n="btn.profile_save">
+            Sign + publish profile
+          </button>
+        </div>
+      </section>
+
+      <section class="card" aria-labelledby="contacts-h">
+        <h2 id="contacts-h" data-i18n="contacts.h">Contacts</h2>
+        <p class="muted" data-i18n="contacts.muted">
+          Local-only contacts for the active side (§7.4). The list is
+          never published; each entry's capability set overrides the
+          peer's profile for traffic accepted from them.
+        </p>
+        <ul id="contacts-list" class="sides-list"></ul>
+        <div class="row">
+          <input
+            id="contact-addr"
+            type="text"
+            spellcheck="false"
+            data-i18n-placeholder="contacts.addr_placeholder"
+            placeholder="contact's side address (sv1…)"
+          />
+        </div>
+        <div class="row">
+          <input
+            id="contact-nick"
+            type="text"
+            spellcheck="false"
+            data-i18n-placeholder="contacts.nick_placeholder"
+            placeholder="nickname (local-only)"
+          />
+          <input
+            id="contact-caps"
+            type="text"
+            spellcheck="false"
+            data-i18n-placeholder="contacts.caps_placeholder"
+            placeholder="capabilities (comma-separated)"
+            value="direct-message"
+          />
+          <button id="contact-add" data-i18n="btn.contact_add">Add contact</button>
+        </div>
+      </section>
+
       <section class="card" aria-labelledby="pair-show-h">
         <h2 id="pair-show-h">Pair another device</h2>
         <p class="muted">

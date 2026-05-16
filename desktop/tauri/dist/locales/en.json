@@ -53,5 +53,19 @@
   "btn.back": "Back",
   "btn.create_side": "Create side",
   "btn.save_seed": "Save seed file",
-  "btn.finish": "Open Sidevers"
+  "btn.finish": "Open Sidevers",
+  "profile.h": "Profile",
+  "profile.muted": "Per-side profile (§7.3). Published to peers who fetch it, and consulted by them to gate which message types they'll send to you (§7.7 capability tokens). Edits below sign + publish under the active side.",
+  "profile.name_label": "Display name",
+  "profile.bio_label": "Bio",
+  "profile.caps_label": "Capabilities",
+  "profile.caps_placeholder": "direct-message, storage-host, verse-host (comma-separated)",
+  "btn.profile_load": "Reload from store",
+  "btn.profile_save": "Sign + publish profile",
+  "contacts.h": "Contacts",
+  "contacts.muted": "Local-only contacts for the active side (§7.4). The list is never published; each entry's capability set overrides the peer's profile for traffic accepted from them.",
+  "contacts.addr_placeholder": "contact's side address (sv1…)",
+  "contacts.nick_placeholder": "nickname (local-only)",
+  "contacts.caps_placeholder": "capabilities (comma-separated)",
+  "btn.contact_add": "Add contact"
 }

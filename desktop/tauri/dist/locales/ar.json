@@ -53,5 +53,19 @@
   "btn.back": "السابق",
   "btn.create_side": "أنشئ جانبًا",
   "btn.save_seed": "احفظ ملف البذرة",
-  "btn.finish": "افتح سايدفرز"
+  "btn.finish": "افتح سايدفرز",
+  "profile.h": "الملف الشخصي",
+  "profile.muted": "ملف لكل جانب (§7.3). يُنشر للنظراء الذين يطلبونه، ويستشيرونه لتقرير أي أنواع الرسائل سيرسلونها إليك (رموز قدرات §7.7). تُوقَّع التعديلات وتُنشر تحت الجانب النشط.",
+  "profile.name_label": "اسم العرض",
+  "profile.bio_label": "نبذة",
+  "profile.caps_label": "الصلاحيات",
+  "profile.caps_placeholder": "direct-message, storage-host, verse-host (مفصولة بفواصل)",
+  "btn.profile_load": "أعد التحميل من المخزن",
+  "btn.profile_save": "وقّع وانشر الملف",
+  "contacts.h": "جهات الاتصال",
+  "contacts.muted": "جهات اتصال محليّة فقط للجانب النشط (§7.4). القائمة لا تُنشر؛ وصلاحيات كل مدخل تتجاوز ملف النظير للرسائل الواردة منه.",
+  "contacts.addr_placeholder": "عنوان جانب جهة الاتصال (sv1…)",
+  "contacts.nick_placeholder": "اللقب (محلي فقط)",
+  "contacts.caps_placeholder": "الصلاحيات (مفصولة بفواصل)",
+  "btn.contact_add": "أضف جهة اتصال"
 }

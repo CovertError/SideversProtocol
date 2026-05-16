@@ -31,10 +31,12 @@ use serde::Serialize;
 use sidevers_core::keys::{MasterKey, SECRET_KEY_LEN, SideKey};
 use sidevers_core::messages::direct::{DirectBody, DirectKind, DirectMessagePayload};
 use sidevers_core::payload as core_payload;
-use sidevers_core::{Address, AddressKind, Envelope, MessageType, PairingQr};
+use sidevers_core::{Address, AddressKind, Envelope, MessageType, PairingQr, ProfilePayload};
 use sidevers_net::{
-    InboxEntry, InboxStore, Intent, Node, Session, SideStore, send_dm as send_dm_helper,
+    InboxEntry, InboxStore, Intent, Node, Session, SideRelationship, SideStore,
+    send_dm as send_dm_helper,
 };
+use std::collections::BTreeSet;
 use tauri::{Emitter, State};
 use tokio::sync::Mutex;
 
@@ -444,6 +446,176 @@ async fn list_sides(state: State<'_, AppState>) -> Result<Vec<HostedSide>, Strin
     Ok(out)
 }
 
+// ---------------------------------------------------------------------
+// Phase 3.C — profile + relationships UI surface
+// ---------------------------------------------------------------------
+
+#[derive(Serialize, Clone)]
+struct ProfileView {
+    name: Option<String>,
+    bio: Option<String>,
+    /// Capability tokens this side accepts (§7.7). Stable identifier
+    /// strings — see sidevers_core::messages::profile::capability for
+    /// the canonical list.
+    capabilities: Vec<String>,
+    updated_at: u64,
+}
+
+#[tauri::command]
+async fn get_profile(
+    side_address: String,
+    state: State<'_, AppState>,
+) -> Result<Option<ProfileView>, String> {
+    let node = {
+        let g = state.node.lock().await;
+        g.as_ref()
+            .cloned()
+            .ok_or_else(|| "node not started".to_owned())?
+    };
+    let side_pk = decode_side_address(&side_address)?;
+    let side = node
+        .side_by_address(&side_pk)
+        .await
+        .ok_or_else(|| "side not hosted on this node".to_owned())?;
+    Ok(side.profile().await.map(|p| ProfileView {
+        name: p.name.clone(),
+        bio: p.bio.clone(),
+        capabilities: p.capabilities.iter().cloned().collect(),
+        updated_at: p.updated_at,
+    }))
+}
+
+#[tauri::command]
+async fn set_profile(
+    side_address: String,
+    name: Option<String>,
+    bio: Option<String>,
+    capabilities: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let node = {
+        let g = state.node.lock().await;
+        g.as_ref()
+            .cloned()
+            .ok_or_else(|| "node not started".to_owned())?
+    };
+    let side_pk = decode_side_address(&side_address)?;
+    let side = node
+        .side_by_address(&side_pk)
+        .await
+        .ok_or_else(|| "side not hosted on this node".to_owned())?;
+    let side_key = side.keypair_arc();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let caps: BTreeSet<String> = capabilities.into_iter().collect();
+    let payload = ProfilePayload::sign(&side_key, name, None, bio, None, None, caps, now)
+        .map_err(|e| format!("sign profile: {e}"))?;
+    side.set_profile(payload).await;
+    Ok(())
+}
+
+#[derive(Serialize, Clone)]
+struct RelationshipView {
+    address: String,
+    nickname: Option<String>,
+    capabilities: Vec<String>,
+    notes: Option<String>,
+    pinned: bool,
+    added_at: u64,
+}
+
+#[tauri::command]
+async fn list_relationships(
+    side_address: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<RelationshipView>, String> {
+    let node = {
+        let g = state.node.lock().await;
+        g.as_ref()
+            .cloned()
+            .ok_or_else(|| "node not started".to_owned())?
+    };
+    let side_pk = decode_side_address(&side_address)?;
+    let side = node
+        .side_by_address(&side_pk)
+        .await
+        .ok_or_else(|| "side not hosted on this node".to_owned())?;
+    Ok(side
+        .list_relationships()
+        .await
+        .into_iter()
+        .map(|r| RelationshipView {
+            address: Address::new(AddressKind::Side, r.address).encode(),
+            nickname: r.nickname,
+            capabilities: r.capabilities.iter().cloned().collect(),
+            notes: r.notes,
+            pinned: r.pinned,
+            added_at: r.added_at,
+        })
+        .collect())
+}
+
+#[tauri::command]
+async fn add_relationship_cmd(
+    side_address: String,
+    peer_address: String,
+    nickname: Option<String>,
+    capabilities: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let node = {
+        let g = state.node.lock().await;
+        g.as_ref()
+            .cloned()
+            .ok_or_else(|| "node not started".to_owned())?
+    };
+    let side_pk = decode_side_address(&side_address)?;
+    let side = node
+        .side_by_address(&side_pk)
+        .await
+        .ok_or_else(|| "side not hosted on this node".to_owned())?;
+    let peer_pk = decode_side_address(&peer_address)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let r = SideRelationship {
+        address: peer_pk,
+        nickname,
+        introduced_by: None,
+        capabilities: capabilities.into_iter().collect(),
+        notes: None,
+        pinned: false,
+        added_at: now,
+    };
+    side.add_relationship(r).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn remove_relationship_cmd(
+    side_address: String,
+    peer_address: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let node = {
+        let g = state.node.lock().await;
+        g.as_ref()
+            .cloned()
+            .ok_or_else(|| "node not started".to_owned())?
+    };
+    let side_pk = decode_side_address(&side_address)?;
+    let side = node
+        .side_by_address(&side_pk)
+        .await
+        .ok_or_else(|| "side not hosted on this node".to_owned())?;
+    let peer_pk = decode_side_address(&peer_address)?;
+    side.remove_relationship(&peer_pk).await;
+    Ok(())
+}
+
 #[derive(Serialize, Clone)]
 struct RetireResp {
     side_address: String,
@@ -676,6 +848,12 @@ fn main() {
             add_side,
             retire_side_cmd,
             load_inbox_history,
+            // Phase 3.C — profile + contacts UI surface
+            get_profile,
+            set_profile,
+            list_relationships,
+            add_relationship_cmd,
+            remove_relationship_cmd,
             // Phase 3.D onboarding wizard
             default_data_dir,
             is_onboarded,
