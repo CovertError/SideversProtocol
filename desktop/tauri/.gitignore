@@ -1,0 +1,10 @@
+# Tauri / Cargo build output (already covered by repo-root .gitignore
+# but be explicit so a stray cargo invocation in this dir doesn't
+# accidentally commit anything).
+target/
+
+# Phase 3 UI overhaul: per-OS Tailwind v4 binary (~80 MB).
+# Setup instructions in tools/README.md; each developer downloads
+# their own. Never check this in.
+tools/tailwindcss
+tools/tailwindcss.exe

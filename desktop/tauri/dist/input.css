@@ -1,0 +1,582 @@
+/* Sidevers desktop client — Tailwind v4 input file (Phase 3 redesign).
+ *
+ * Built into `dist/style.css` by `desktop/tauri/build-tailwind.sh`
+ * using the standalone Tailwind v4 CLI (see `tools/README.md`).
+ *
+ * Three sections below:
+ *   1. @import "tailwindcss"      — pulls in Tailwind preflight + utilities
+ *   2. @theme { ... }             — brand-locked color tokens + fonts;
+ *                                   these names become utility classes
+ *                                   (bg-sv-bg, text-sv-text, etc.)
+ *   3. @layer base { ... }        — the existing hand-written rules,
+ *                                   pasted verbatim so Stage A produces
+ *                                   a visually-identical page. Stage C
+ *                                   deletes most of this as sections
+ *                                   migrate to Tailwind utility classes.
+ */
+
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------------
+ * Brand tokens — locked palette (six grays, Sidevers brand-docs §7.3)
+ * --------------------------------------------------------------------- */
+@theme {
+  /* Raw palette (Apple-system feel, deliberately monochrome). */
+  --color-sv-snow: #ffffff;
+  --color-sv-mist: #f5f5f7;
+  --color-sv-silver-light: #d2d2d7;
+  --color-sv-silver: #86868b;
+  --color-sv-ink: #1d1d1f;
+  --color-sv-onyx: #000000;
+
+  /* Semantic aliases used in markup (bg-sv-bg, text-sv-text, etc.). */
+  --color-sv-bg: var(--color-sv-snow);
+  --color-sv-surface: var(--color-sv-mist);
+  --color-sv-border: var(--color-sv-silver-light);
+  --color-sv-text: var(--color-sv-ink);
+  --color-sv-text-muted: var(--color-sv-silver);
+  --color-sv-text-strong: var(--color-sv-onyx);
+
+  /* Local fonts (Phase 3.J @font-face declarations are in @layer base). */
+  --font-sans:
+    "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui,
+    sans-serif;
+  --font-mono:
+    "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+/* Dark mode flips the semantic aliases. Tailwind v4 default
+ * darkMode = `class` — `<html class="dark">` activates. The
+ * Settings section's theme toggle persists this via SideStore. */
+.dark {
+  --color-sv-bg: var(--color-sv-onyx);
+  --color-sv-surface: var(--color-sv-ink);
+  --color-sv-border: #3a3a3c;
+  --color-sv-text: var(--color-sv-mist);
+  --color-sv-text-muted: var(--color-sv-silver);
+  --color-sv-text-strong: var(--color-sv-snow);
+}
+
+/* ---------------------------------------------------------------------
+ * Stage A bridge: existing hand-written CSS pasted as @layer base
+ * so the first Tailwind build produces a visually-identical page.
+ * Stage C deletes these rules section-by-section as the markup
+ * migrates to Tailwind utilities.
+ *
+ * Notes:
+ *   * @font-face declarations have to live OUTSIDE @layer base
+ *     (browsers refuse to honor them inside cascade layers in
+ *     some engines). Kept at top-level here.
+ *   * The page-default background / text colors come from the
+ *     body rule below, which now references the @theme aliases.
+ * --------------------------------------------------------------------- */
+
+/* Phase 3.J local @font-face — files in dist/fonts/. If absent, the
+ * font-family stack falls through to system sans-serif. */
+@font-face {
+  font-family: "Geist";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/Geist-Regular.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Geist";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/Geist-Medium.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Geist";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/Geist-SemiBold.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Geist Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/GeistMono-Regular.woff2") format("woff2");
+}
+
+@layer base {
+  /* Body baseline. Tailwind's preflight resets margins/padding;
+   * our brand background + text colors come from the @theme
+   * semantic aliases above. */
+  html,
+  body {
+    height: 100%;
+    background: var(--color-sv-bg);
+    color: var(--color-sv-text);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.5;
+    font-feature-settings:
+      "ss01",
+      "ss02";
+  }
+
+  /* All the existing card / input / button rules are kept here
+   * verbatim so Stage A is visually a no-op. Each is tagged with
+   * the section it'll get migrated out of in Stage C; once the
+   * matching section's markup uses Tailwind utilities, the
+   * corresponding rule below can be deleted.
+   */
+
+  /* topbar */
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.875rem 1.5rem;
+    border-bottom: 1px solid var(--color-sv-border);
+    background: var(--color-sv-bg);
+  }
+  .logo {
+    height: 28px;
+    width: auto;
+  }
+  @media (prefers-color-scheme: dark) {
+    .logo {
+      filter: invert(1);
+    }
+  }
+  .topbar-right {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+  }
+  .lang-switch {
+    background: var(--color-sv-bg);
+    color: var(--color-sv-text);
+    border: 1px solid var(--color-sv-border);
+    border-radius: 5px;
+    padding: 0.25rem 0.5rem;
+    font-family: inherit;
+    font-size: 0.78rem;
+    cursor: pointer;
+  }
+  .status {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.82rem;
+    color: var(--color-sv-text-muted);
+  }
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+  .dot-idle {
+    background: var(--color-sv-silver-light);
+  }
+  .dot-running {
+    background: var(--color-sv-ink);
+  }
+  @media (prefers-color-scheme: dark) {
+    .dot-running {
+      background: var(--color-sv-snow);
+    }
+  }
+
+  /* main + cards */
+  main {
+    padding: 1.25rem 1.5rem 2rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    max-width: 980px;
+  }
+  .card {
+    background: var(--color-sv-surface);
+    border: 1px solid var(--color-sv-border);
+    border-radius: 8px;
+    padding: 1rem 1.25rem 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.625rem;
+  }
+  .card h2 {
+    margin: 0;
+    font-size: 0.95rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--color-sv-text);
+  }
+  .muted {
+    margin: 0 0 0.25rem;
+    color: var(--color-sv-text-muted);
+    font-size: 0.85rem;
+  }
+  .label {
+    width: 130px;
+    min-width: 130px;
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--color-sv-text-muted);
+  }
+  .row {
+    display: flex;
+    gap: 0.625rem;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  /* inputs */
+  input[type="text"],
+  textarea {
+    flex: 1;
+    min-width: 0;
+    background: var(--color-sv-bg);
+    border: 1px solid var(--color-sv-border);
+    color: var(--color-sv-text);
+    padding: 0.5rem 0.7rem;
+    border-radius: 5px;
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    outline: none;
+    transition: border-color 0.15s ease;
+  }
+  input[type="text"]:focus,
+  textarea:focus {
+    border-color: var(--color-sv-text);
+  }
+  textarea {
+    min-height: 64px;
+    max-height: 240px;
+    resize: vertical;
+    width: 100%;
+  }
+  input[readonly],
+  textarea[readonly] {
+    color: var(--color-sv-text-muted);
+    background: var(--color-sv-surface);
+  }
+
+  /* buttons */
+  button {
+    background: var(--color-sv-text);
+    color: var(--color-sv-bg);
+    border: 0;
+    padding: 0.5rem 1rem;
+    border-radius: 5px;
+    font-family: inherit;
+    font-weight: 500;
+    font-size: 0.82rem;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: opacity 0.12s ease;
+  }
+  button:hover {
+    opacity: 0.88;
+  }
+  button:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+  }
+  button.secondary {
+    background: transparent;
+    color: var(--color-sv-text);
+    border: 1px solid var(--color-sv-border);
+  }
+  button.secondary:hover {
+    background: var(--color-sv-surface);
+    opacity: 1;
+  }
+
+  /* status / error region */
+  .error {
+    margin: 0;
+    padding: 0.5rem 0;
+    color: var(--color-sv-text);
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    min-height: 1.2em;
+    white-space: pre-wrap;
+  }
+  .error.ok {
+    color: var(--color-sv-text-muted);
+  }
+  .error:not(:empty) {
+    border-top: 1px solid var(--color-sv-border);
+    padding-top: 0.75rem;
+  }
+
+  /* inbox list */
+  .inbox-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .inbox-list li {
+    background: var(--color-sv-bg);
+    border: 1px solid var(--color-sv-border);
+    border-radius: 5px;
+    padding: 0.625rem 0.875rem;
+  }
+  .inbox-list .from {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--color-sv-text-muted);
+    margin-bottom: 0.25rem;
+  }
+  .inbox-list .body {
+    color: var(--color-sv-text);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  /* QR display */
+  .qr-display {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0.875rem 0 0;
+  }
+  .qr-svg {
+    display: flex;
+    justify-content: center;
+    padding: 0.75rem;
+    background: var(--color-sv-snow);
+    border: 1px solid var(--color-sv-border);
+    border-radius: 6px;
+  }
+  .qr-svg svg {
+    max-width: 240px;
+    width: 100%;
+    height: auto;
+    display: block;
+  }
+  @media (prefers-color-scheme: dark) {
+    .qr-svg {
+      background: var(--color-sv-snow);
+    }
+  }
+
+  /* hosted sides list (Phase 3.B multi-side) */
+  .sides-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .sides-list li {
+    background: var(--color-sv-bg);
+    border: 1px solid var(--color-sv-border);
+    border-radius: 5px;
+    padding: 0.625rem 0.875rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+  .sides-list li.side-row {
+    cursor: pointer;
+    transition:
+      border-color 0.15s ease,
+      background 0.15s ease;
+  }
+  .sides-list li.side-row:hover {
+    border-color: var(--color-sv-text-muted);
+  }
+  .sides-list li.side-row:focus {
+    outline: none;
+    border-color: var(--color-sv-text);
+  }
+  .sides-list li.side-row-active {
+    border-color: var(--color-sv-text);
+    background: var(--color-sv-surface);
+  }
+  .sides-list .side-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+  .sides-list .side-label {
+    font-weight: 600;
+    font-size: 0.85rem;
+    color: var(--color-sv-text);
+  }
+  .sides-list .side-state {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--color-sv-text-muted);
+  }
+  .sides-list li.side-row-active .side-state {
+    color: var(--color-sv-text);
+  }
+  .sides-list .side-addr {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--color-sv-text);
+    word-break: break-all;
+  }
+  .sides-list .side-listen {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--color-sv-text-muted);
+  }
+
+  /* lifecycle badge + retire button (Phase 3.C) */
+  .sides-list .side-badge {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 0.1rem 0.45rem;
+    border-radius: 3px;
+    border: 1px solid var(--color-sv-border);
+    color: var(--color-sv-text-muted);
+  }
+  .sides-list .lifecycle-active {
+    border-color: var(--color-sv-text);
+    color: var(--color-sv-text);
+  }
+  .sides-list .lifecycle-dormant {
+    border-color: var(--color-sv-silver-light);
+    color: var(--color-sv-text-muted);
+  }
+  .sides-list .lifecycle-retired {
+    border-color: var(--color-sv-text);
+    color: var(--color-sv-text);
+    background: var(--color-sv-surface);
+    text-decoration: line-through;
+  }
+  .sides-list .side-actions {
+    margin-top: 0.5rem;
+  }
+  .sides-list .side-retire {
+    font-size: 0.75rem;
+    padding: 0.25rem 0.6rem;
+  }
+
+  /* RTL overrides (Phase 3.H) */
+  [dir="rtl"] body {
+    font-family:
+      "Geist", "Segoe UI", -apple-system, BlinkMacSystemFont, "Tajawal",
+      system-ui, sans-serif;
+  }
+  [dir="rtl"] .label {
+    text-align: right;
+  }
+  [dir="rtl"] input[type="text"],
+  [dir="rtl"] textarea {
+    direction: ltr;
+    text-align: right;
+  }
+  [dir="rtl"] .inbox-list .from,
+  [dir="rtl"] .sides-list .side-addr,
+  [dir="rtl"] .sides-list .side-listen,
+  [dir="rtl"] .sides-list .side-state {
+    direction: ltr;
+    text-align: right;
+    unicode-bidi: embed;
+  }
+
+  /* onboarding overlay (Phase 3.D) */
+  .onboarding {
+    position: fixed;
+    inset: 0;
+    background: var(--color-sv-bg);
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem;
+    overflow-y: auto;
+  }
+  .onboarding-card {
+    width: 100%;
+    max-width: 620px;
+    background: var(--color-sv-surface);
+    border: 1px solid var(--color-sv-border);
+    border-radius: 10px;
+    padding: 2.5rem 2.5rem 2rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+  }
+  .onboarding-logo {
+    height: 36px;
+    width: auto;
+    align-self: flex-start;
+    margin-bottom: 0.5rem;
+  }
+  @media (prefers-color-scheme: dark) {
+    .onboarding-logo {
+      filter: invert(1);
+    }
+  }
+  .onboarding-stepper {
+    list-style: none;
+    margin: 0 0 0.5rem;
+    padding: 0;
+    display: flex;
+    gap: 0.5rem;
+  }
+  .onboarding-step {
+    width: 28px;
+    height: 28px;
+    border-radius: 14px;
+    border: 1px solid var(--color-sv-border);
+    font-size: 0.78rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--color-sv-text-muted);
+    font-family: var(--font-mono);
+  }
+  .onboarding-step.active {
+    border-color: var(--color-sv-text);
+    color: var(--color-sv-text);
+    background: var(--color-sv-bg);
+  }
+  .onboarding-step.done {
+    border-color: var(--color-sv-text);
+    background: var(--color-sv-text);
+    color: var(--color-sv-bg);
+  }
+  .onboarding-screen h1 {
+    margin: 0;
+    font-size: 1.4rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  .onboarding-screen p {
+    margin: 0;
+    color: var(--color-sv-text-muted);
+    line-height: 1.55;
+  }
+  .onboarding-screen p code {
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    background: var(--color-sv-bg);
+    padding: 0.05rem 0.25rem;
+    border-radius: 3px;
+    border: 1px solid var(--color-sv-border);
+  }
+  .onboarding-screen p strong {
+    color: var(--color-sv-text);
+    font-weight: 600;
+  }
+  .onboarding-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+  }
+}
+
+/* End of Stage A bridge. Stage B will add Tailwind-utility-styled
+ * sidebar + main pane components in their own @layer components
+ * block. Stage C deletes the rules above section by section. */
