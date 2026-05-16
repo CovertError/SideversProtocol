@@ -17,9 +17,16 @@ use sidevers_core::keys::{PUBLIC_KEY_LEN, SideKey};
 use sidevers_core::verse::{ContractObject, VerseContentKey};
 use tokio::sync::Mutex;
 
+use crate::verse_post_store::VersePostStore;
+
 #[derive(Clone)]
 pub struct VerseHost {
     inner: Arc<Mutex<VerseHostInner>>,
+    /// Phase 1.5.D persistent (in-memory for now) per-verse post log.
+    /// Shared by-value with this `VerseHost` clone, so a handler that
+    /// has a `VerseHost` can insert + retract without grabbing the
+    /// inner-state mutex.
+    posts: VersePostStore,
 }
 
 pub(crate) struct VerseHostInner {
@@ -48,7 +55,13 @@ impl VerseHost {
                 consented_versions: HashMap::new(),
                 active_sessions: HashMap::new(),
             })),
+            posts: VersePostStore::new(),
         }
+    }
+
+    /// Handle to the per-verse post store (Phase 1.5.D).
+    pub fn posts(&self) -> VersePostStore {
+        self.posts.clone()
     }
 
     pub(crate) async fn with<R>(&self, f: impl FnOnce(&VerseHostInner) -> R) -> R {

@@ -1098,6 +1098,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
             1_700_000_000,
         )
         .unwrap();
@@ -1246,6 +1247,7 @@ mod tests {
             2,
             "Book Club v2",
             "Now with pronouns required.",
+            vec![],
             vec![],
             vec![],
             vec![],

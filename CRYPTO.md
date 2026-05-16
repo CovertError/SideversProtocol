@@ -9,8 +9,11 @@ primitive used, and flags the deviations and known limitations.
 It is the document we hand a reviewer along with the code. Anything in here
 should be answerable from the codebase as it stands.
 
-**Status:** Phase 1 + 1.5a + 1.5b + 1.5c complete; 142 tests green (incl. 9
-FFI integration); cross-platform validated for macOS / Linux / Windows /
+**Status:** Phase 1 + 1.5a/b/c (verse surface) + 1.5d (profile / capability /
+retirement) + 1.5e (relationships / lifecycle / jitter) + 1.5f (multi-side
+hosting / SQLite persistence / multi-device QR pairing) + 1.5g (live state
+delta sync between co-holders) complete; **207 tests green** (incl. 9 FFI
+integration); cross-platform validated for macOS / Linux / Windows /
 iOS / Android.
 
 ---
@@ -106,7 +109,7 @@ calls into one of the above libraries.
 | Spec | Location | Notes |
 |------|----------|-------|
 | §8.2 verse keypair | the verse's keypair is just another Ed25519 keypair (Sidevers identities and verses share keyspace; only the bech32m HRP differs) | held by `VerseHost::verse_key` |
-| §8.3 ContractObject (11 fields, inline-signed) | `sidevers-core/src/verse.rs` | re-encode check on parse |
+| §8.3 ContractObject (12 fields, inline-signed) | `sidevers-core/src/verse.rs` | re-encode check on parse. Phase 1.5.B added `moderators: Vec<[u8;32]>` between `signature` and `description` in canonical key order; **wire format is incompatible with pre-1.5.B serializations** — empty list = "verse keypair is sole moderator" (backward-equivalent semantically) |
 | §8.4 field kinds | `FieldKind` with well-known constants + `custom:<name>` escape | |
 | §8.5 ContractFetch / ContractDeliver / JoinRequest / JoinAccept / JoinDecline (0x50–0x54) | `sidevers-core/src/messages/verse.rs` + `serve_verse` in `node.rs` | tested in `verse_form_join_and_post_round_trip` |
 | §8.6 verse content key (32 bytes, ChaCha20-Poly1305) | `VerseContentKey::generate` / `seal` / `open` | 12-byte AEAD nonce drawn from OS CSPRNG per call |
@@ -115,9 +118,43 @@ calls into one of the above libraries.
 | §8.6.3 forward secrecy at rotation | tested in `verse_leave_rotates_key_so_old_key_cannot_decrypt`: bob's old key is explicitly used in a decryption attempt against post-rotation ciphertext, and asserted to fail |
 | §8.7 amendment + reconsent | `Node::host_amend_verse` pushes `VerseAmend` to active members; `reconsent_to_amendment` is the member-side helper | tested in `verse_live_amend_pushes_new_contract_and_member_reconsents` |
 | §8.8 leave + remove + DataDisposition | `VerseLeavePayload` + `VerseRemovePayload` + handlers | DataDisposition is advisory per spec |
-| §8.9 moderator authority | Phase 1.5b: only the verse keypair is a moderator. Multiple moderators (with `moderators` field on the wire) is Phase 1.5d |
+| §8.9 moderator authority | Phase 1.5.B: `ContractObject.moderators` on the wire; `is_moderator(side)` returns true for the verse keypair OR any listed side. `VERSE_REMOVE` handler accepts any moderator's signed envelope (sender must equal `issued_by`, no cross-signing). |
 
-### 2.7 FFI surface (Phase-3 mobile lite mode)
+### 2.7 Sides — extended surface (spec §7, Phases 1.5d/e/f/g)
+
+| Spec | Location | Notes |
+|------|----------|-------|
+| §7.3 Profile (signed object, 9-entry CBOR map) | `sidevers-core/src/messages/profile.rs` (`ProfilePayload`) | Ed25519 over BLAKE3(unsigned); re-encode check on parse; capability set as `BTreeSet<String>` for canonical iteration |
+| §7.3 Profile fetch/deliver wire types (0x23, 0x24) | `sidevers-core/src/envelope.rs` (constants) + `serve_direct` dispatch in `node.rs` | side-to-side; nonce-bound to the side being queried |
+| §7.4 Side relationships (local-only) | `sidevers-net/src/relationships.rs` (`SideRelationship`, `RelationshipTable`) + `sidevers-net/src/side.rs` (write-through to SQLite) | never on the wire (spec §7.4); persisted in `relationships` table |
+| §7.4 Per-contact capability override | `Node::capability_allows` 3-tier lookup: relationship → profile → permissive default | empty-set relationship = explicit block |
+| §7.5 Multi-device co-holders | `sidevers-core/src/messages/device.rs` (PairingRequest / StateBundle / DeviceRevoke / StateDelta / PairingQr codec) + `sidevers-net/src/node.rs` (`generate_pairing_qr`, `accept_pairing`, `revoke_co_holder`) | state bundle sealed via X25519+ChaCha20-Poly1305 (AAD `"sidevers/v1/device-state-bundle"`) to the new device's pubkey; binding check: outer envelope side == bundle.side AND inner side_seed re-derives bundle.side |
+| §7.5 QR-driven pairing nonce | 16-byte CSPRNG nonce recorded in `Side::pending_pairings`; consumed atomically under Mutex in `take_pending_pairing`; 10-minute TTL | replay-safe by construction (single-use entry) |
+| §7.6 Per-side independent QUIC endpoints | `Node::add_side` opens a fresh `quinn::Endpoint` per hosted side | honors "no multiplexing across sides" |
+| §7.6 Randomized publish jitter | `sidevers-net/src/hygiene.rs` — `apply_publish_jitter` (default 250 ms) | called at the start of `fanout_broadcast` and `publish_broadcast`; disable via `set_jitter_disabled(true)` for deterministic tests |
+| §7.7 Capability tokens (6 standard) | `profile::capability::{DIRECT_MESSAGE, STORAGE_HOST, VERSE_MODERATE, GOSSIP_RELAY, DISCOVERABLE, INDEXABLE}` | only DIRECT_MESSAGE is currently enforced at the wire layer; the others round-trip but are advisory until later phases |
+| §7.8 Side retirement record | `sidevers-core/src/messages/retirement.rs` (`SideRetirementPayload`, 0x25) | signed by the retiring side; receivers log `WARN` on subsequent signed envelopes (per spec §7.8 "anomalous but accepted") |
+| §7.8 Side lifecycle (Created / Active / Dormant / Retired) | `sidevers-net/src/relationships.rs` (`SideLifecycle::derive`) | local-only; derived from `last_local_send_at` |
+
+### 2.8 Multi-device live state sync (spec §7.5+, Phase 1.5g)
+
+| Spec | Location | Notes |
+|------|----------|-------|
+| State delta wire type (0x29) | `sidevers-core/src/messages/device.rs` (`StateDeltaPayload`, `DeltaOp`) | signed by side keypair (any co-holder can produce); 8 op variants: ProfileUpdated/Cleared, RelationshipUpserted/Removed, RetiredObserved, LifecycleChanged, CoHolderAdded/Removed |
+| Auto-push on mutation | `Node::set_local_profile` / `add_relationship` / `remove_relationship` push to all known co-holders via `push_delta_to_co_holders` | fire-and-forget `tokio::spawn` per co-holder; failures log but don't surface to caller |
+| Pairing closes the address loop | `Node::accept_pairing` pushes `CoHolderAdded {us, our_listen}` back to existing device after install | enables bidirectional delta flow |
+| Last-write-wins conflict resolution | `Side::apply_delta` compares `applied_at` against per-field timestamps | retirement is sticky (cannot un-retire via delta) |
+| Self-loop / echo guard | `apply_delta::CoHolderAdded` drops if `device_pubkey == self.address` OR already revoked | prevents infinite-loop / re-add of revoked devices in N≥3 topologies |
+
+### 2.9 SQLite persistence (Phase 1.5f / 1.5g)
+
+| Aspect | Location | Notes |
+|--------|----------|-------|
+| Per-side state on disk | `sidevers-net/src/side_store.rs` (rusqlite "bundled") | one file at `<data_dir>/sides.db`; tables: `sides`, `profiles`, `retired_sides_seen`, `relationships`, `co_holders`, `revoked_devices`, `co_holder_addrs` |
+| Schema versioning | `schema_version` table — currently v2 | v1→v2 migration adds `co_holder_addrs`; **integration-tested** via `v1_database_migrates_to_v2_without_data_loss` |
+| At-rest encryption | Not in this phase; the `sides.seed` BLOB column is plaintext | mitigated by OS-level disk encryption + the data_dir directory being mode 0700 (deployer's responsibility); application-level encryption is a Phase 2 hardening |
+
+### 2.10 FFI surface (Phase-3 mobile lite mode)
 
 | Operation | Function | Source |
 |-----------|----------|--------|
@@ -258,6 +295,39 @@ or genuine gaps to flag.
 10. **iOS/Android runtime testing is not in CI.** Cross-compile checks
     (compile-only) are in CI for all five mobile targets. Runtime tests
     on real devices is Phase-3 mobile-client work.
+
+11. **Multi-device live state sync uses transport-only encryption.**
+    Phase 1.5g's `STATE_DELTA` envelopes (0x29) carry profile,
+    relationships, retired-sides observations, and lifecycle deltas
+    between co-holders. The OUTER envelope is signed by the side
+    keypair (Ed25519), but the PAYLOAD is **not** end-to-end sealed via
+    X25519+ChaCha20 — only the QUIC transport (TLS 1.3 with `rustls` +
+    `ring`) protects it on the wire. A relay or path observer that
+    compromises the TLS material could read deltas in flight. Co-holders
+    are *equally privileged* per spec §7.5 (they share the side keypair),
+    so end-to-end sealing the delta would only protect against the
+    transport-layer adversary — a real concern but bounded. Adding
+    per-device attestation chains + delta sealing is Phase 1.5h+.
+
+12. **Side seed stored in cleartext in SQLite.** The `sides.seed` column
+    in `<data_dir>/sides.db` holds the 32-byte side secret in the clear.
+    Loss of the DB file = loss of all side identities + ability to
+    impersonate any hosted side. Mitigations: the deployer is expected
+    to keep the data_dir under OS-level disk encryption (FileVault on
+    macOS, LUKS on Linux, BitLocker on Windows, and the iOS/Android
+    app-private-data sandbox on mobile). Application-level encryption
+    via OS keychain-derived KEK is a Phase 2 hardening when the
+    distribution model warrants it.
+
+13. **Multi-device network-level revocation is local-only.** When a
+    co-holder publishes `DeviceRevoke` (0x28), other co-holders mark the
+    revoked device locally and refuse to re-add it via state-delta sync.
+    But because the side keypair is shared across all co-holders (per
+    spec §7.5), peers receiving an envelope signed by the side keypair
+    have no way to distinguish a revoked device's signature from any
+    other co-holder's. Proper network-level revocation requires per-
+    device attestation chains (each device has its own keypair, side
+    delegates with signed records). Phase 1.5h+.
 
 ---
 

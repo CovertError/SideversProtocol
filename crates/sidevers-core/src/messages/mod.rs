@@ -17,4 +17,5 @@ pub mod peer;
 pub mod profile;
 pub mod rendezvous;
 pub mod retirement;
+pub mod storage_prefs;
 pub mod verse;

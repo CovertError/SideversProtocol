@@ -32,6 +32,13 @@ pub const NONCE_LEN: usize = 16;
 /// many seconds away from local time (§3.2: "more than 300 seconds skewed").
 pub const DEFAULT_MAX_SKEW_SECS: u64 = 300;
 
+/// Soft tolerance: envelopes between `DEFAULT_MAX_SKEW_SECS` and
+/// `SOFT_MAX_SKEW_SECS` are still accepted but raise a warning, so
+/// operators see clock-skew problems instead of silently dropping all
+/// traffic when one side's clock drifts. Phase 1.H1 graceful fallback.
+/// Envelopes above this threshold are dropped as before.
+pub const SOFT_MAX_SKEW_SECS: u64 = 900;
+
 /// Message type tag (§3.5, Appendix A). Stored on the wire as a CBOR uint;
 /// every type defined in protocol v1 fits in one byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -59,6 +66,11 @@ impl MessageType {
     pub const DEVICE_REVOKE: Self = Self(0x28);
     /// Phase 1.5g: live state delta pushed between co-holders (§7.5).
     pub const STATE_DELTA: Self = Self(0x29);
+    /// Phase 1.G: publish a `LinkageProof` (§2.7) on the wire so a peer can
+    /// independently verify two sides agreed to be linked. The envelope
+    /// payload is the LinkageProof's canonical CBOR (`LinkageProof::to_wire_bytes`).
+    /// Sent on a Direct-intent session.
+    pub const LINKAGE_PUBLISH: Self = Self(0x2A);
 
     // Storage (§5) — Month 3
     pub const STORAGE_GET: Self = Self(0x30);
@@ -567,6 +579,12 @@ mod tests {
         let err = Envelope::from_wire_bytes(&bytes).unwrap_err();
         assert!(matches!(err, Error::SignatureInvalid));
     }
+
+    // Phase 1.H1 wiring depends on SOFT > DEFAULT so the soft band is
+    // non-empty. If someone shrinks SOFT below DEFAULT the graceful-
+    // fallback band collapses and we silently regress to the old
+    // hard-cutoff behavior. A const-time check trips compilation.
+    const _: () = assert!(SOFT_MAX_SKEW_SECS > DEFAULT_MAX_SKEW_SECS);
 
     #[test]
     fn freshness_window_enforced() {

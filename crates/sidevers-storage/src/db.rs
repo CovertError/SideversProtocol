@@ -29,6 +29,12 @@ fn migrate(conn: &Connection) -> Result<()> {
             last_accessed INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_objects_pinned ON objects(pinned);
+        -- Phase 1.H2 (audit-pass): composite index for LRU eviction.
+        -- `evict_to_budget` walks unpinned rows oldest-first; without
+        -- this index the SELECT was a full table scan that stalled
+        -- the conn lock for ~50ms+ at 100k objects.
+        CREATE INDEX IF NOT EXISTS objects_evict
+            ON objects (pinned, last_accessed ASC, added_at ASC);
         "#,
     )?;
     Ok(())

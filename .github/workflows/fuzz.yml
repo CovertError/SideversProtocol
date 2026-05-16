@@ -1,0 +1,92 @@
+name: fuzz
+
+# Phase 1.F2: nightly fuzz run. Smoke-tests every harness in
+# `fuzz/fuzz_targets/` for 60 seconds each on a single CI runner; any
+# panic or crash uploads the failing seed as an artifact and fails
+# the job.
+#
+# Triggers:
+#   * nightly schedule (06:17 UTC — off-peak)
+#   * `workflow_dispatch` so it can be kicked manually for a single
+#     target via the `target` input
+#   * pushes to main that touch `fuzz/**` or any decoder source file
+#     so a behavioral change in a parser gets fuzzed before it sits
+#     for a day
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Single target to run (default: all)"
+        required: false
+        type: string
+      duration_secs:
+        description: "Per-target run time in seconds"
+        required: false
+        type: string
+        default: "60"
+  push:
+    branches: [main]
+    paths:
+      - "fuzz/**"
+      - "crates/sidevers-core/src/cbor.rs"
+      - "crates/sidevers-core/src/envelope.rs"
+      - "crates/sidevers-core/src/messages/**"
+      - "crates/sidevers-core/src/linkage.rs"
+      - "crates/sidevers-core/src/verse.rs"
+      - "crates/sidevers-core/src/payload.rs"
+
+jobs:
+  fuzz:
+    name: cargo fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust (cargo-fuzz requires it)
+        uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "fuzz -> target"
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Enumerate fuzz targets
+        id: targets
+        working-directory: fuzz
+        run: |
+          if [ -n "${{ inputs.target }}" ]; then
+            echo "list=${{ inputs.target }}" >> "$GITHUB_OUTPUT"
+          else
+            # Audit-pass M4: use find -name '*.rs' so a stray README
+            # or .gitignore in fuzz_targets/ doesn't get treated as a
+            # binary name and break `cargo fuzz run`.
+            list=$(find fuzz_targets -maxdepth 1 -name '*.rs' -type f \
+              -exec basename {} .rs \; | tr '\n' ' ')
+            echo "list=$list" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run each fuzz target
+        working-directory: fuzz
+        run: |
+          duration="${{ inputs.duration_secs }}"
+          duration="${duration:-60}"
+          for target in ${{ steps.targets.outputs.list }}; do
+            echo "::group::fuzz $target ($duration s)"
+            cargo +nightly fuzz run "$target" -- -max_total_time="$duration"
+            echo "::endgroup::"
+          done
+
+      - name: Upload crash artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: |
+            fuzz/artifacts/**
+            fuzz/corpus/**
+          retention-days: 14

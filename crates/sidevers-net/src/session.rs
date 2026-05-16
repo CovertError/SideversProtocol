@@ -70,6 +70,10 @@ pub struct Session {
     pub session_key: [u8; SESSION_KEY_LEN],
     pub peer_side: [u8; PUBLIC_KEY_LEN],
     pub intent: Intent,
+    /// Capabilities the peer advertised in Hello / HelloBack (Phase 1.D).
+    /// Currently observational — handlers may consult to gate optional
+    /// features the spec ties to advertised capabilities.
+    pub peer_capabilities: std::collections::BTreeMap<String, u64>,
 }
 
 impl Session {
@@ -84,6 +88,25 @@ impl Session {
             session_key,
             peer_side,
             intent,
+            peer_capabilities: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Construct a session with peer-capabilities set. Used by the
+    /// handshake; external callers usually go through `new`.
+    pub fn with_capabilities(
+        connection: quinn::Connection,
+        session_key: [u8; SESSION_KEY_LEN],
+        peer_side: [u8; PUBLIC_KEY_LEN],
+        intent: Intent,
+        peer_capabilities: std::collections::BTreeMap<String, u64>,
+    ) -> Self {
+        Self {
+            connection,
+            session_key,
+            peer_side,
+            intent,
+            peer_capabilities,
         }
     }
 

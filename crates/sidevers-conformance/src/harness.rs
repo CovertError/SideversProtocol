@@ -479,6 +479,7 @@ mod tests {
             vec![FieldKind::new(FieldKind::REAL_NAME)],
             vec![],
             vec![],
+            vec![],
             1_700_000_000,
         )
         .unwrap();
@@ -528,6 +529,128 @@ mod tests {
         .expect("post channel closed");
         assert_eq!(received.plaintext, b"hello book club");
         assert_eq!(received.envelope.from, *member.address().key_bytes());
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 1.5+ — §8.4 field-kind enforcement at JOIN_REQUEST.
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn join_declined_when_required_field_missing() {
+        use sidevers_core::messages::verse::FieldValues;
+        use sidevers_core::verse::{ContractObject, FieldKind, FieldSpec, VerseContentKey};
+        use sidevers_net::{VerseHost, request_join};
+
+        let host = TestNode::spawn("host").await;
+        let member = TestNode::spawn("member").await;
+
+        let verse_master = sidevers_core::keys::MasterKey::from_seed(&[0x44u8; 32]);
+        let verse_key_signing = verse_master.derive_side(&"verse".into()).unwrap();
+        let contract = ContractObject::sign(
+            &verse_key_signing,
+            1,
+            "Strict club",
+            "Display name is mandatory.",
+            vec![FieldSpec {
+                kind: FieldKind::new(FieldKind::DISPLAY_NAME),
+                label: "Display name".into(),
+                description: None,
+                validator: None,
+            }],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            1_700_000_000,
+        )
+        .unwrap();
+        let content_key = VerseContentKey::generate().unwrap();
+        let verse_key_host = verse_master.derive_side(&"verse".into()).unwrap();
+        host.node
+            .host_verse(VerseHost::new(
+                verse_key_host,
+                contract.clone(),
+                content_key,
+            ))
+            .await;
+
+        let session = member
+            .node
+            .dial(host.listen_addr(), sidevers_net::Intent::Verse)
+            .await
+            .unwrap();
+        // Member sends a JoinRequest with NO display-name field.
+        let result =
+            request_join(&session, member.node.side(), &contract, FieldValues::new()).await;
+        let err = result.expect_err("expected decline");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("missing-required"),
+            "expected 'missing-required' decline, got {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn join_declined_when_forbidden_field_present() {
+        use sidevers_core::messages::verse::FieldValues;
+        use sidevers_core::verse::{ContractObject, FieldKind, FieldSpec, VerseContentKey};
+        use sidevers_net::{VerseHost, request_join};
+
+        let host = TestNode::spawn("host").await;
+        let member = TestNode::spawn("member").await;
+
+        let verse_master = sidevers_core::keys::MasterKey::from_seed(&[0x55u8; 32]);
+        let verse_key_signing = verse_master.derive_side(&"verse".into()).unwrap();
+        // Required: display name. Forbidden: real name.
+        let contract = ContractObject::sign(
+            &verse_key_signing,
+            1,
+            "Anonymous club",
+            "No real names here.",
+            vec![FieldSpec {
+                kind: FieldKind::new(FieldKind::DISPLAY_NAME),
+                label: "Display name".into(),
+                description: None,
+                validator: None,
+            }],
+            vec![],
+            vec![FieldKind::new(FieldKind::REAL_NAME)],
+            vec![],
+            vec![],
+            vec![],
+            1_700_000_000,
+        )
+        .unwrap();
+        let content_key = VerseContentKey::generate().unwrap();
+        let verse_key_host = verse_master.derive_side(&"verse".into()).unwrap();
+        host.node
+            .host_verse(VerseHost::new(
+                verse_key_host,
+                contract.clone(),
+                content_key,
+            ))
+            .await;
+
+        let session = member
+            .node
+            .dial(host.listen_addr(), sidevers_net::Intent::Verse)
+            .await
+            .unwrap();
+        // Member sends a JoinRequest including the FORBIDDEN real-name kind.
+        let mut fields: FieldValues = std::collections::BTreeMap::new();
+        fields.insert(FieldKind::new(FieldKind::DISPLAY_NAME), "yasmine".into());
+        fields.insert(
+            FieldKind::new(FieldKind::REAL_NAME),
+            "Yasmine Al-Saud".into(),
+        );
+        let result = request_join(&session, member.node.side(), &contract, fields).await;
+        let err = result.expect_err("expected decline");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("forbidden-field"),
+            "expected 'forbidden-field' decline, got {msg}"
+        );
     }
 
     #[tokio::test]
@@ -588,25 +711,26 @@ mod tests {
     async fn spawn_verse_host(
         label: &str,
     ) -> (TestNode, SideKey, sidevers_core::verse::ContractObject) {
-        use sidevers_core::verse::{ContractObject, FieldKind, FieldSpec, VerseContentKey};
+        use sidevers_core::verse::{ContractObject, FieldKind, VerseContentKey};
         use sidevers_net::VerseHost;
         let host = TestNode::spawn(label).await;
         let verse_master = MasterKey::generate().unwrap();
         let verse_key = verse_master.derive_side(&"verse".into()).unwrap();
         let verse_key_for_host = verse_master.derive_side(&"verse".into()).unwrap();
+        // No required fields: these tests focus on fanout / leave / amend
+        // semantics, not field-kind enforcement (which lives in its own
+        // `join_declined_when_*` scenarios). Real-name is still forbidden
+        // so the existing forbidden-kind round-trip in the protocol-level
+        // tests keeps that surface exercised.
         let contract = ContractObject::sign(
             &verse_key,
             1,
             "Book Club",
             "Reading together.",
-            vec![FieldSpec {
-                kind: FieldKind::new(FieldKind::DISPLAY_NAME),
-                label: "Display name".into(),
-                description: None,
-                validator: None,
-            }],
+            vec![],
             vec![],
             vec![FieldKind::new(FieldKind::REAL_NAME)],
+            vec![],
             vec![],
             vec![],
             1_700_000_000,
@@ -997,6 +1121,7 @@ mod tests {
                 validator: None,
             }],
             vec![FieldKind::new(FieldKind::REAL_NAME)],
+            vec![],
             vec![],
             vec![],
             1_700_000_500,
@@ -1583,6 +1708,497 @@ mod tests {
         let _ = private_seed;
     }
 
+    #[tokio::test]
+    async fn dial_from_uses_secondary_side_endpoint_and_identity() {
+        // Phase 3.B: dial_from(secondary_side) must route through the
+        // secondary side's own QUIC endpoint and present the secondary
+        // side's pubkey to the peer (spec §7.6: traffic for each side
+        // travels on its own connection).
+        disable_jitter_once();
+        let alice = TestNode::spawn("work").await;
+        let bob = TestNode::spawn("bob").await;
+        let master = MasterKey::generate().unwrap();
+        let private_side = master.derive_side(&"private".into()).unwrap();
+        let private_addr = private_side.public_bytes();
+        alice
+            .node
+            .add_side(private_side, SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .await
+            .unwrap();
+
+        let session = alice
+            .node
+            .dial_from(&private_addr, bob.listen_addr(), Intent::Direct)
+            .await
+            .unwrap();
+        // bob saw the handshake; his peer_side must be alice's *secondary*
+        // pubkey, never alice's primary.
+        assert_eq!(session.peer_side, bob.node.side().public_bytes());
+
+        let private_side_arc = alice.node.side_by_address(&private_addr).await.unwrap();
+        let private_key = private_side_arc.keypair_arc();
+        send_dm(&session, &private_key, b"hello from secondary")
+            .await
+            .unwrap();
+        drop(session);
+
+        let dm = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            bob.node.next_direct_message(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(&dm.plaintext, b"hello from secondary");
+        // bob's recorded sender is alice's *secondary* side, not primary.
+        assert_eq!(dm.envelope.from, private_addr);
+        assert_ne!(dm.envelope.from, alice.node.side().public_bytes());
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 1.B1 — NAT hole-punching wrapper.
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn hole_punch_dial_succeeds_on_loopback() {
+        // No real NAT on loopback, but the wrapper's retry + timeout
+        // path is still exercised. We assert the first attempt lands
+        // and we get a usable Session.
+        disable_jitter_once();
+        let alice = TestNode::spawn("a").await;
+        let bob = TestNode::spawn("b").await;
+        let session = alice
+            .node
+            .hole_punch_dial(
+                bob.listen_addr(),
+                Intent::Direct,
+                sidevers_net::HolePunchConfig::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(session.peer_side, bob.node.side().public_bytes());
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 1.H4 — QUIC connection pool.
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn dial_pooled_does_not_grow_pool_on_repeat() {
+        // Pool semantics: the first dial seeds the pool with one
+        // connection per (peer, source-side); subsequent dial_pooled
+        // calls to the same peer reuse that connection rather than
+        // opening another. Asserting pool size stays at 1 across
+        // many dials is the cheapest unambiguous check for reuse —
+        // quinn::Connection::stable_id is per-handle and not portable
+        // across clones in quinn 0.11.
+        disable_jitter_once();
+        let alice = TestNode::spawn("a").await;
+        let bob = TestNode::spawn("b").await;
+        assert!(alice.node.connection_pool().is_empty().await);
+
+        for _ in 0..5 {
+            let _ = alice
+                .node
+                .dial_pooled(bob.listen_addr(), Intent::Direct)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            alice.node.connection_pool().len().await,
+            1,
+            "repeated dial_pooled to one peer must keep the pool at size 1"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 1.A3 — Gossip-fanout web-of-trust filter (§6.9.3).
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn gossip_policy_default_is_open() {
+        // The default policy doesn't change behavior, so existing
+        // gossip tests keep passing. This test pins down that fact.
+        let n = TestNode::spawn("n").await;
+        let p = n.node.gossip_policy().await;
+        assert_eq!(p.propagation, sidevers_net::GossipPropagation::Open);
+    }
+
+    #[tokio::test]
+    async fn gossip_policy_can_be_tightened_to_relationships_only() {
+        // Mostly an API smoke test: set the policy and read it back.
+        // End-to-end propagation under tight policy needs a 3-node
+        // setup (originator → relay → receiver) which the existing
+        // broadcast test already covers structurally — what's new
+        // here is that the relay CAN choose to filter.
+        let n = TestNode::spawn("n").await;
+        n.node
+            .set_gossip_policy(sidevers_net::GossipPolicy::relationships_only())
+            .await;
+        let p = n.node.gossip_policy().await;
+        assert_eq!(
+            p.propagation,
+            sidevers_net::GossipPropagation::RelationshipsOnly
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 1.C3 — Storage retract per-publisher provenance (§5.6).
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn storage_retract_ignored_when_sender_never_published_the_object() {
+        // Bob receives an OFFER of object X from alice, accepts, ingests.
+        // Then mallory (different side) sends a retract for X — bob must
+        // ignore it and keep serving the object.
+        use sidevers_storage::Reference;
+
+        disable_jitter_once();
+        let alice = TestNode::spawn("alice").await;
+        let bob = TestNode::spawn("bob").await;
+
+        // Alice puts a bytes-blob in her local store and offers to bob.
+        let bytes = b"the-payload".to_vec();
+        let size = bytes.len() as u64;
+        let hash = alice.node.store().put(bytes).await.unwrap();
+        let reference = Reference::new(hash, size, "application/octet-stream");
+        let session_ab = alice
+            .node
+            .dial(bob.listen_addr(), Intent::Storage)
+            .await
+            .unwrap();
+        let wanted = sidevers_net::offer_object(
+            &session_ab,
+            alice.node.side(),
+            reference,
+            &alice.node.store(),
+        )
+        .await
+        .unwrap();
+        assert!(wanted, "bob must want the object initially");
+        drop(session_ab);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        // Mallory has no relationship to this object. She retracts it.
+        let mallory = TestNode::spawn("mallory").await;
+        let session_mb = mallory
+            .node
+            .dial(bob.listen_addr(), Intent::Storage)
+            .await
+            .unwrap();
+        sidevers_net::retract_object(&session_mb, mallory.node.side(), hash)
+            .await
+            .unwrap();
+        drop(session_mb);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let publishers = bob.node.publisher_set(&hash).await;
+        assert!(
+            publishers.contains(&alice.node.side().public_bytes()),
+            "alice (the original publisher) must still be in bob's publisher set; got {publishers:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn storage_retract_clears_publisher_set_when_only_publisher_retracts() {
+        use sidevers_storage::Reference;
+
+        disable_jitter_once();
+        let alice = TestNode::spawn("alice").await;
+        let bob = TestNode::spawn("bob").await;
+        let bytes = b"alice-payload".to_vec();
+        let size = bytes.len() as u64;
+        let hash = alice.node.store().put(bytes).await.unwrap();
+        let reference = Reference::new(hash, size, "application/octet-stream");
+
+        let session_ab = alice
+            .node
+            .dial(bob.listen_addr(), Intent::Storage)
+            .await
+            .unwrap();
+        sidevers_net::offer_object(
+            &session_ab,
+            alice.node.side(),
+            reference,
+            &alice.node.store(),
+        )
+        .await
+        .unwrap();
+        drop(session_ab);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let session_ab = alice
+            .node
+            .dial(bob.listen_addr(), Intent::Storage)
+            .await
+            .unwrap();
+        sidevers_net::retract_object(&session_ab, alice.node.side(), hash)
+            .await
+            .unwrap();
+        drop(session_ab);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let publishers = bob.node.publisher_set(&hash).await;
+        assert!(
+            publishers.is_empty(),
+            "after sole publisher retracts, publisher set must be empty; got {publishers:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 1.G4 — §6.10 architectural invariants.
+    //
+    // These tests don't introduce new behavior; they pin down properties
+    // the architecture relies on so a future refactor can't accidentally
+    // violate them.
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn invariant_no_global_view_fresh_node_peer_table_is_empty() {
+        // §6.10: there is no global view. A freshly-started node knows
+        // about NO other node — it must learn peers via direct dial,
+        // PEER_TELL gossip, or rendezvous, all of which require some
+        // prior connection. No bootstrap registry is consulted.
+        let alice = TestNode::spawn("work").await;
+        let count = alice.node.peers().len().await;
+        assert_eq!(
+            count, 0,
+            "a freshly-spawned node must NOT know any peers: peer-table contains {count} entry/entries"
+        );
+    }
+
+    #[tokio::test]
+    async fn invariant_no_anonymous_routing_envelope_signature_must_match_from() {
+        // §6.10 + §3.3: every envelope is signed by its `from` side; the
+        // network layer must reject any envelope whose signature doesn't
+        // verify against the embedded `from`. There is no anonymous
+        // routing path: every envelope is cryptographically attributed
+        // before any handler sees it.
+        use sidevers_core::Envelope;
+
+        let alice = MasterKey::generate()
+            .unwrap()
+            .derive_side(&"a".into())
+            .unwrap();
+        let bob = MasterKey::generate()
+            .unwrap()
+            .derive_side(&"b".into())
+            .unwrap();
+        // Build a valid envelope from alice, then rewrite `from` to claim
+        // bob's identity. The signature still says alice — verification
+        // must fail.
+        let env = Envelope::sign_with(
+            sidevers_core::MessageType::DIRECT_MESSAGE,
+            &alice,
+            None,
+            b"hi".to_vec(),
+            1_700_000_000,
+            [0x77; 16],
+        )
+        .unwrap();
+        let mut wire = env.to_wire_bytes();
+        // Locate `from` in the encoded bytes by looking for alice's
+        // public key and overwrite it with bob's. (The CBOR decoder
+        // will then refuse to verify the signature.)
+        let alice_pk = alice.public_bytes();
+        let bob_pk = bob.public_bytes();
+        let pos = wire
+            .windows(alice_pk.len())
+            .position(|w| w == alice_pk)
+            .expect("envelope must contain alice's pubkey verbatim");
+        wire[pos..pos + alice_pk.len()].copy_from_slice(&bob_pk);
+
+        let err = Envelope::from_wire_bytes(&wire).unwrap_err();
+        // Must be a signature-related failure, not a parse error.
+        assert!(
+            matches!(
+                err,
+                sidevers_core::Error::SignatureInvalid | sidevers_core::Error::CborNotCanonical(_)
+            ),
+            "rewriting `from` must yield a signature-invalid error, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn invariant_no_global_broadcast_third_party_not_in_session_never_sees_it() {
+        // §6.10: a "broadcast" is fan-out across CURRENTLY-CONNECTED
+        // gossip sessions only. A third party who hasn't dialed in
+        // does not receive the message.
+        disable_jitter_once();
+        let alice = TestNode::spawn("a").await;
+        let bob = TestNode::spawn("b").await;
+        let dave = TestNode::spawn("d").await;
+        // alice ↔ bob established. dave is NOT connected to either.
+        let session = alice
+            .node
+            .dial(bob.listen_addr(), Intent::Gossip)
+            .await
+            .unwrap();
+        sidevers_net::publish_broadcast(&session, alice.node.side(), b"announce".to_vec())
+            .await
+            .unwrap();
+        drop(session);
+
+        // bob (in session) sees it.
+        let bob_recv = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            bob.node.next_public_broadcast(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(bob_recv.payload, b"announce");
+
+        // dave (out of session) MUST NOT see it.
+        let dave_poll = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            dave.node.next_public_broadcast(),
+        )
+        .await;
+        assert!(
+            dave_poll.is_err(),
+            "third-party uninvolved node MUST NOT see broadcast — got {dave_poll:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 1.G1 — LinkageProof publication wire path (§2.7).
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn linkage_proof_publishes_and_verifies_end_to_end() {
+        use sidevers_core::linkage::LinkageProof;
+        use sidevers_net::publish_linkage_proof;
+
+        disable_jitter_once();
+        let alice = TestNode::spawn("work").await;
+        let bob = TestNode::spawn("bob").await;
+
+        // Build a linkage proof for alice's primary side + a second
+        // side she owns. Both signatures will verify against the
+        // proof's embedded pubkeys; bob doesn't need either pubkey
+        // pre-shared.
+        let master = MasterKey::generate().unwrap();
+        let other_side = master.derive_side(&"public".into()).unwrap();
+        let proof = LinkageProof::sign(alice.node.side(), &other_side, 1_700_000_000).unwrap();
+        let side_a = proof.side_a;
+        let side_b = proof.side_b;
+
+        // Alice dials bob over Direct intent and publishes the proof.
+        let session = alice
+            .node
+            .dial(bob.listen_addr(), Intent::Direct)
+            .await
+            .unwrap();
+        publish_linkage_proof(&session, alice.node.side(), &proof)
+            .await
+            .unwrap();
+        drop(session);
+
+        let recv = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            bob.node.next_linkage_proof(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(recv.proof.side_a, side_a);
+        assert_eq!(recv.proof.side_b, side_b);
+        assert_eq!(recv.envelope.from, alice.node.side().public_bytes());
+    }
+
+    #[tokio::test]
+    async fn linkage_proof_rejected_when_sender_is_neither_linked_side() {
+        // Spec §2.7: anyone with the proof bytes can VERIFY it (both
+        // signatures are public), but the wire dispatch insists the
+        // envelope sender be one of the two linked sides — to keep
+        // unattributable third-party relays out of the inbox.
+        use sidevers_core::linkage::LinkageProof;
+        use sidevers_net::publish_linkage_proof;
+
+        disable_jitter_once();
+        let bob = TestNode::spawn("bob").await;
+        let m_a = MasterKey::generate().unwrap();
+        let side_a = m_a.derive_side(&"a".into()).unwrap();
+        let side_b = m_a.derive_side(&"b".into()).unwrap();
+        let proof = LinkageProof::sign(&side_a, &side_b, 1_700_000_000).unwrap();
+
+        let relay = TestNode::spawn("relay").await;
+        let session = relay
+            .node
+            .dial(bob.listen_addr(), Intent::Direct)
+            .await
+            .unwrap();
+        // relay signs the envelope, but `proof.side_a/_b` belong to
+        // someone else.
+        publish_linkage_proof(&session, relay.node.side(), &proof)
+            .await
+            .unwrap();
+        drop(session);
+
+        // Bob's linkage channel must NOT see this — give the loop a
+        // moment to drop it.
+        let polled = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            bob.node.next_linkage_proof(),
+        )
+        .await;
+        assert!(
+            polled.is_err(),
+            "third-party relay's linkage publish must be silently dropped"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 1.D — Handshake capabilities (§4.3) + per-source rate-limit (§4.6).
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn session_carries_peer_advertised_capabilities() {
+        // After a real handshake, both ends record the *other* end's
+        // capabilities on the Session. Phase 1.D wired this — before,
+        // the capabilities BTreeMap round-tripped empty.
+        disable_jitter_once();
+        let alice = TestNode::spawn("work").await;
+        let bob = TestNode::spawn("bob").await;
+        let session = alice
+            .node
+            .dial(bob.listen_addr(), Intent::Direct)
+            .await
+            .unwrap();
+        assert!(
+            !session.peer_capabilities.is_empty(),
+            "peer must advertise at least one capability"
+        );
+        let protocol = session
+            .peer_capabilities
+            .get(sidevers_net::handshake::CAP_PROTOCOL)
+            .copied();
+        assert_eq!(protocol, Some(1));
+        let intents = session
+            .peer_capabilities
+            .get(sidevers_net::handshake::CAP_INTENTS_MASK)
+            .copied()
+            .unwrap_or_default();
+        // Direct (intent 1) and Verse (intent 4) must be present.
+        assert!(intents & (1 << 1) != 0);
+        assert!(intents & (1 << 4) != 0);
+    }
+
+    #[tokio::test]
+    async fn handshake_limit_throttles_excessive_source() {
+        // Exercise the limiter directly with a small bucket so the
+        // test stays deterministic. Wiring into accept_loop is
+        // covered by the unit tests in handshake_limit.rs.
+        use sidevers_net::HandshakeLimiter;
+        let l = HandshakeLimiter::new(2.0, 0.001);
+        let ip: std::net::IpAddr = "203.0.113.7".parse().unwrap();
+        assert!(l.try_acquire(ip).await);
+        assert!(l.try_acquire(ip).await);
+        assert!(!l.try_acquire(ip).await);
+        // A different source is unaffected.
+        let other: std::net::IpAddr = "203.0.113.8".parse().unwrap();
+        assert!(l.try_acquire(other).await);
+    }
+
     // -------------------------------------------------------------------
     // Phase 1.5f Track C — Multi-device pairing (§7.5).
     // -------------------------------------------------------------------
@@ -1817,6 +2433,91 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         panic!("wait_for: predicate never became true within 4s");
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 1.5h — Anti-spam Tier 1: per-peer rate limit + refuse (§6.9).
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn dm_from_refused_peer_is_dropped() {
+        // Bob manually refuses Alice via the reputation table; Alice's
+        // subsequent DM is silently dropped at the envelope-entry gate
+        // BEFORE the freshness/replay/capability checks run.
+        disable_jitter_once();
+        let alice = TestNode::spawn("work").await;
+        let bob = TestNode::spawn("close").await;
+
+        // Bob refuses Alice.
+        bob.node
+            .reputation()
+            .refuse(&alice.node.side().public_bytes(), 1)
+            .await;
+
+        let session = alice
+            .node
+            .dial(bob.listen_addr(), Intent::Direct)
+            .await
+            .unwrap();
+        send_dm(&session, alice.node.side(), b"shouldn't arrive")
+            .await
+            .unwrap();
+        drop(session);
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(800),
+            bob.node.next_direct_message(),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "expected DM to be dropped by reputation gate"
+        );
+
+        // Counter ticks for the dropped envelope.
+        let snap = bob
+            .node
+            .reputation()
+            .get(&alice.node.side().public_bytes())
+            .await
+            .unwrap();
+        assert!(snap.refused);
+        assert!(snap.envelopes_seen >= 1);
+    }
+
+    #[tokio::test]
+    async fn reinstated_peer_dms_arrive_again() {
+        disable_jitter_once();
+        let alice = TestNode::spawn("work").await;
+        let bob = TestNode::spawn("close").await;
+
+        bob.node
+            .reputation()
+            .refuse(&alice.node.side().public_bytes(), 1)
+            .await;
+        bob.node
+            .reputation()
+            .reinstate(&alice.node.side().public_bytes())
+            .await;
+
+        let session = alice
+            .node
+            .dial(bob.listen_addr(), Intent::Direct)
+            .await
+            .unwrap();
+        send_dm(&session, alice.node.side(), b"after reinstate")
+            .await
+            .unwrap();
+        drop(session);
+
+        let dm = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            bob.node.next_direct_message(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(&dm.plaintext, b"after reinstate");
     }
 
     #[tokio::test]

@@ -216,6 +216,117 @@ impl PolicyClause {
         }
         Ok(Self { kind, params })
     }
+
+    /// Phase 1.5.G: classify this clause as one of the well-known
+    /// policy kinds. Returns `None` for unrecognized custom kinds
+    /// (implementations MAY still honor them via opaque pass-through).
+    pub fn classify(&self) -> Option<KnownPolicyKind> {
+        match self.kind.as_str() {
+            "no-archive" => Some(KnownPolicyKind::NoArchive),
+            "retention-max-days" => Some(KnownPolicyKind::RetentionMaxDays {
+                days: self.params.get("days").and_then(|s| s.parse().ok()),
+            }),
+            "require-real-name" => Some(KnownPolicyKind::RequireRealName),
+            "ephemeral" => Some(KnownPolicyKind::Ephemeral {
+                ttl_secs: self.params.get("ttl_secs").and_then(|s| s.parse().ok()),
+            }),
+            "moderation-required" => Some(KnownPolicyKind::ModerationRequired),
+            _ => None,
+        }
+    }
+
+    /// True if classify() returns Some — i.e. this Node knows how to
+    /// reason about the clause. Unknown clauses are not necessarily
+    /// invalid; they're just opaque to this version's evaluator.
+    pub fn is_known(&self) -> bool {
+        self.classify().is_some()
+    }
+}
+
+/// Phase 1.5.G: closed enum of policy kinds the Phase-1 evaluator
+/// understands. Custom verse-defined kinds round-trip as `String`
+/// but won't classify into this enum.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum KnownPolicyKind {
+    /// `no-archive` — posts MUST NOT be archived. Hosts SHOULD treat
+    /// the in-memory log as authoritative and decline persistence.
+    NoArchive,
+    /// `retention-max-days` — posts older than `days` SHOULD be
+    /// dropped from the host's persistent log. `None` = malformed,
+    /// implementations SHOULD ignore the clause and log.
+    RetentionMaxDays { days: Option<u64> },
+    /// `require-real-name` — the `real_name` field is required at
+    /// JOIN_REQUEST. Combined with `forbidden` enforcement, lets a
+    /// verse opt in to verified-identity membership.
+    RequireRealName,
+    /// `ephemeral` — posts older than `ttl_secs` MAY be dropped by
+    /// the host. Distinct from retention in being measured in seconds
+    /// (for short-lived channels).
+    Ephemeral { ttl_secs: Option<u64> },
+    /// `moderation-required` — every post must be approved by a
+    /// moderator before fanout. Phase 1.5.G classification only; the
+    /// approval-flow wire path is Phase-2 work.
+    ModerationRequired,
+}
+
+fn policy_is_restrictive(k: &KnownPolicyKind) -> bool {
+    matches!(
+        k,
+        KnownPolicyKind::NoArchive
+            | KnownPolicyKind::RequireRealName
+            | KnownPolicyKind::ModerationRequired
+            | KnownPolicyKind::Ephemeral { .. }
+            | KnownPolicyKind::RetentionMaxDays { .. }
+    )
+}
+
+/// Phase 1.5.C: classification of a `self → new` ContractObject
+/// amendment along the reductive/expansive axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AmendmentKind {
+    /// Tightens the rules (new required fields, new forbidden fields,
+    /// new restrictive policies). MUST require reconsent.
+    Reductive,
+    /// Loosens the rules (new optional fields, removed
+    /// requirements, removed restrictive policies). MAY skip
+    /// reconsent depending on local policy.
+    Expansive,
+    /// Both reductive and expansive signals fire. Treat as
+    /// requiring reconsent for safety.
+    Mixed,
+}
+
+impl AmendmentKind {
+    /// True iff the amendment tightens the rules — i.e. existing
+    /// members MUST re-consent before posting under it. Expansive-only
+    /// amendments MAY proceed without reconsent.
+    pub fn requires_reconsent(&self) -> bool {
+        matches!(self, AmendmentKind::Reductive | AmendmentKind::Mixed)
+    }
+}
+
+/// Sum the recognition state across all clauses in a contract.
+/// Useful for the operator UI: "you've defined 3 policies, 2 of
+/// which this build of the protocol understands."
+pub fn classify_all<'a>(
+    policies: impl IntoIterator<Item = &'a PolicyClause>,
+) -> PolicyClassification {
+    let mut known = Vec::new();
+    let mut unknown = Vec::new();
+    for c in policies {
+        match c.classify() {
+            Some(k) => known.push(k),
+            None => unknown.push(c.kind.clone()),
+        }
+    }
+    PolicyClassification { known, unknown }
+}
+
+/// Result of classifying a contract's policies.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PolicyClassification {
+    pub known: Vec<KnownPolicyKind>,
+    pub unknown: Vec<String>,
 }
 
 // ============================================================================
@@ -233,6 +344,11 @@ pub struct ContractObject {
     pub forbidden: Vec<FieldKind>,
     pub scoped: Vec<FieldKind>,
     pub policies: Vec<PolicyClause>,
+    /// Phase 1.5.B (§8.2 + §8.9): additional moderator side pubkeys
+    /// with delegated authority. The verse's own keypair always counts
+    /// as a moderator; this list adds others. Empty = the verse keypair
+    /// is sole moderator (backward-compatible with pre-1.5.B contracts).
+    pub moderators: Vec<[u8; PUBLIC_KEY_LEN]>,
     pub issued_at: u64,
     pub signature: [u8; SIGNATURE_LEN],
 }
@@ -241,11 +357,11 @@ impl ContractObject {
     /// Canonical CBOR key order (RFC 8949 §4.2.1 bytewise on encoded keys):
     ///
     ///   title < verse < scoped < version < optional < policies < required
-    ///   < forbidden < issued_at < signature < description
+    ///   < forbidden < issued_at < signature < moderators < description
     ///
-    /// The "unsigned" form omits `signature` (10 keys); the signature is
-    /// Ed25519 over `BLAKE3(unsigned-encoding)` keyed by the verse's own
-    /// private key.
+    /// The "unsigned" form omits `signature` (11 keys including moderators);
+    /// the signature is Ed25519 over `BLAKE3(unsigned-encoding)` keyed by the
+    /// verse's own private key.
     #[allow(clippy::too_many_arguments)]
     fn encode_unsigned(
         verse: &[u8; PUBLIC_KEY_LEN],
@@ -257,6 +373,7 @@ impl ContractObject {
         forbidden: &[FieldKind],
         scoped: &[FieldKind],
         policies: &[PolicyClause],
+        moderators: &[[u8; PUBLIC_KEY_LEN]],
         issued_at: u64,
     ) -> Vec<u8> {
         let entries = [
@@ -297,6 +414,10 @@ impl ContractObject {
                 value: cbor::uint(issued_at),
             },
             MapEntry {
+                key: cbor::text("moderators"),
+                value: encode_moderators(moderators),
+            },
+            MapEntry {
                 key: cbor::text("description"),
                 value: cbor::text(description),
             },
@@ -308,6 +429,9 @@ impl ContractObject {
     /// its own Ed25519 keypair; we treat it as a `SideKey` for signing
     /// (Sidevers identities and verses share the keyspace; only the HRP
     /// differs when rendered as an address).
+    ///
+    /// `moderators` is the Phase 1.5.B list of additional moderator side
+    /// pubkeys; pass `Vec::new()` if only the verse keypair moderates.
     #[allow(clippy::too_many_arguments)]
     pub fn sign(
         verse_key: &SideKey,
@@ -319,6 +443,7 @@ impl ContractObject {
         forbidden: Vec<FieldKind>,
         scoped: Vec<FieldKind>,
         policies: Vec<PolicyClause>,
+        moderators: Vec<[u8; PUBLIC_KEY_LEN]>,
         issued_at: u64,
     ) -> Result<Self> {
         let verse = verse_key.public_bytes();
@@ -334,6 +459,7 @@ impl ContractObject {
             &forbidden,
             &scoped,
             &policies,
+            &moderators,
             issued_at,
         );
         let digest = blake3::hash(&unsigned);
@@ -348,6 +474,7 @@ impl ContractObject {
             forbidden,
             scoped,
             policies,
+            moderators,
             issued_at,
             signature,
         })
@@ -396,6 +523,10 @@ impl ContractObject {
                 value: cbor::bytes(&self.signature),
             },
             MapEntry {
+                key: cbor::text("moderators"),
+                value: encode_moderators(&self.moderators),
+            },
+            MapEntry {
                 key: cbor::text("description"),
                 value: cbor::text(&self.description),
             },
@@ -406,9 +537,9 @@ impl ContractObject {
     pub fn from_wire_bytes(bytes: &[u8]) -> Result<Self> {
         let mut r = CborReader::new(bytes);
         let n = r.read_map_header()?;
-        if n != 11 {
+        if n != 12 {
             return Err(Error::CborDecode(format!(
-                "ContractObject expected 11 keys, got {n}"
+                "ContractObject expected 12 keys, got {n}"
             )));
         }
         let expected = [
@@ -422,6 +553,7 @@ impl ContractObject {
             "forbidden",
             "issued_at",
             "signature",
+            "moderators",
             "description",
         ];
         let mut title = None;
@@ -434,6 +566,7 @@ impl ContractObject {
         let mut forbidden = None;
         let mut issued_at = None;
         let mut signature = None;
+        let mut moderators: Option<Vec<[u8; PUBLIC_KEY_LEN]>> = None;
         let mut description = None;
         for e in expected {
             let k = r.read_text()?;
@@ -477,6 +610,7 @@ impl ContractObject {
                     arr.copy_from_slice(b);
                     signature = Some(arr);
                 }
+                "moderators" => moderators = Some(decode_moderators(&mut r)?),
                 "description" => description = Some(r.read_text()?.to_owned()),
                 _ => unreachable!(),
             }
@@ -490,6 +624,7 @@ impl ContractObject {
         let forbidden = forbidden.ok_or(Error::Invariant("missing forbidden"))?;
         let scoped = scoped.ok_or(Error::Invariant("missing scoped"))?;
         let policies = policies.ok_or(Error::Invariant("missing policies"))?;
+        let moderators = moderators.ok_or(Error::Invariant("missing moderators"))?;
         let issued_at = issued_at.ok_or(Error::Invariant("missing issued_at"))?;
         let signature = signature.ok_or(Error::Invariant("missing signature"))?;
 
@@ -504,6 +639,7 @@ impl ContractObject {
             &forbidden,
             &scoped,
             &policies,
+            &moderators,
             issued_at,
         );
         let digest = blake3::hash(&unsigned);
@@ -520,6 +656,7 @@ impl ContractObject {
             forbidden,
             scoped,
             policies,
+            moderators,
             issued_at,
             signature,
         };
@@ -530,6 +667,89 @@ impl ContractObject {
             ));
         }
         Ok(contract)
+    }
+
+    /// True iff `side` is authorized to issue moderation actions on
+    /// this verse (Phase 1.5.B). The verse's own keypair always
+    /// qualifies; listed moderators do too.
+    pub fn is_moderator(&self, side: &[u8; PUBLIC_KEY_LEN]) -> bool {
+        side == &self.verse || self.moderators.iter().any(|m| m == side)
+    }
+
+    /// Phase 1.5.C: classify an amendment from `self` → `new` as
+    /// reductive, expansive, or mixed. The spec treats reductive
+    /// amendments (those that tighten the rules) and expansive ones
+    /// (those that loosen) differently for reconsent purposes —
+    /// reductive amendments MUST always require reconsent; expansive
+    /// ones MAY skip it depending on local policy.
+    ///
+    /// Reductive signals (any of):
+    ///   * `new.required` adds a kind not present in `self.required`
+    ///   * `new.forbidden` adds a kind not present in `self.forbidden`
+    ///   * `new.policies` adds a restrictive policy not present before
+    ///
+    /// Expansive signals (any of):
+    ///   * `new.required` removes a kind
+    ///   * `new.forbidden` removes a kind
+    ///   * `new.optional` adds a kind not present before
+    ///   * a restrictive policy that was present is removed
+    ///
+    /// If both signal sets fire, the result is `Mixed`. If neither
+    /// fires the contracts are content-equivalent (e.g. title /
+    /// description tweak) and we return `Expansive` — no rule was
+    /// tightened.
+    pub fn classify_amendment(&self, new: &ContractObject) -> AmendmentKind {
+        let mut reductive = false;
+        let mut expansive = false;
+
+        let self_req: std::collections::HashSet<&FieldKind> =
+            self.required.iter().map(|s| &s.kind).collect();
+        let new_req: std::collections::HashSet<&FieldKind> =
+            new.required.iter().map(|s| &s.kind).collect();
+        if new_req.difference(&self_req).next().is_some() {
+            reductive = true;
+        }
+        if self_req.difference(&new_req).next().is_some() {
+            expansive = true;
+        }
+
+        let self_forbid: std::collections::HashSet<&FieldKind> = self.forbidden.iter().collect();
+        let new_forbid: std::collections::HashSet<&FieldKind> = new.forbidden.iter().collect();
+        if new_forbid.difference(&self_forbid).next().is_some() {
+            reductive = true;
+        }
+        if self_forbid.difference(&new_forbid).next().is_some() {
+            expansive = true;
+        }
+
+        let self_opt: std::collections::HashSet<&FieldKind> =
+            self.optional.iter().map(|s| &s.kind).collect();
+        let new_opt: std::collections::HashSet<&FieldKind> =
+            new.optional.iter().map(|s| &s.kind).collect();
+        if new_opt.difference(&self_opt).next().is_some() {
+            expansive = true;
+        }
+
+        let self_known: std::collections::HashSet<KnownPolicyKind> =
+            self.policies.iter().filter_map(|p| p.classify()).collect();
+        let new_known: std::collections::HashSet<KnownPolicyKind> =
+            new.policies.iter().filter_map(|p| p.classify()).collect();
+        for k in new_known.difference(&self_known) {
+            if policy_is_restrictive(k) {
+                reductive = true;
+            }
+        }
+        for k in self_known.difference(&new_known) {
+            if policy_is_restrictive(k) {
+                expansive = true;
+            }
+        }
+
+        match (reductive, expansive) {
+            (true, true) => AmendmentKind::Mixed,
+            (true, false) => AmendmentKind::Reductive,
+            (false, _) => AmendmentKind::Expansive,
+        }
     }
 
     /// BLAKE3 of the full canonical wire encoding — the content address
@@ -878,6 +1098,34 @@ fn decode_policies(r: &mut CborReader<'_>) -> Result<Vec<PolicyClause>> {
     Ok(out)
 }
 
+fn encode_moderators(mods: &[[u8; PUBLIC_KEY_LEN]]) -> Vec<u8> {
+    let mut w = cbor::CborWriter::new();
+    w.write_array_header(mods.len());
+    for m in mods {
+        w.write_bytes(m);
+    }
+    w.into_bytes()
+}
+
+fn decode_moderators(r: &mut CborReader<'_>) -> Result<Vec<[u8; PUBLIC_KEY_LEN]>> {
+    let n = r.read_array_header()?;
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let b = r.read_bytes()?;
+        if b.len() != PUBLIC_KEY_LEN {
+            return Err(Error::BadFieldLength {
+                field: "moderator",
+                expected: PUBLIC_KEY_LEN,
+                got: b.len(),
+            });
+        }
+        let mut arr = [0u8; PUBLIC_KEY_LEN];
+        arr.copy_from_slice(b);
+        out.push(arr);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -907,6 +1155,7 @@ mod tests {
             }],
             vec![],
             vec![FieldKind::new(FieldKind::REAL_NAME)],
+            vec![],
             vec![],
             vec![],
             1_700_000_000,
@@ -950,12 +1199,178 @@ mod tests {
                 kind: "no-archive".into(),
                 params,
             }],
+            vec![],
             1_700_000_500,
         )
         .unwrap();
         let bytes = contract.to_wire_bytes();
         let decoded = ContractObject::from_wire_bytes(&bytes).unwrap();
         assert_eq!(decoded, contract);
+    }
+
+    #[test]
+    fn classify_amendment_purely_expansive() {
+        // Adding an optional field is expansive.
+        let verse = deterministic_verse_key();
+        let v1 = ContractObject::sign(
+            &verse,
+            1,
+            "x",
+            "x",
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            1,
+        )
+        .unwrap();
+        let v2 = ContractObject::sign(
+            &verse,
+            2,
+            "x",
+            "x",
+            vec![],
+            vec![FieldSpec {
+                kind: FieldKind::new(FieldKind::PRONOUN),
+                label: "Pronoun".into(),
+                description: None,
+                validator: None,
+            }],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            2,
+        )
+        .unwrap();
+        let kind = v1.classify_amendment(&v2);
+        assert_eq!(kind, AmendmentKind::Expansive);
+        assert!(!kind.requires_reconsent());
+    }
+
+    #[test]
+    fn classify_amendment_purely_reductive() {
+        // Adding a required field is reductive.
+        let verse = deterministic_verse_key();
+        let v1 = ContractObject::sign(
+            &verse,
+            1,
+            "x",
+            "x",
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            1,
+        )
+        .unwrap();
+        let v2 = ContractObject::sign(
+            &verse,
+            2,
+            "x",
+            "x",
+            vec![FieldSpec {
+                kind: FieldKind::new(FieldKind::DISPLAY_NAME),
+                label: "Name".into(),
+                description: None,
+                validator: None,
+            }],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            2,
+        )
+        .unwrap();
+        let kind = v1.classify_amendment(&v2);
+        assert_eq!(kind, AmendmentKind::Reductive);
+        assert!(kind.requires_reconsent());
+    }
+
+    #[test]
+    fn classify_amendment_mixed() {
+        // Add a required (reductive) AND remove a forbidden (expansive).
+        let verse = deterministic_verse_key();
+        let v1 = ContractObject::sign(
+            &verse,
+            1,
+            "x",
+            "x",
+            vec![],
+            vec![],
+            vec![FieldKind::new(FieldKind::REAL_NAME)],
+            vec![],
+            vec![],
+            vec![],
+            1,
+        )
+        .unwrap();
+        let v2 = ContractObject::sign(
+            &verse,
+            2,
+            "x",
+            "x",
+            vec![FieldSpec {
+                kind: FieldKind::new(FieldKind::DISPLAY_NAME),
+                label: "Name".into(),
+                description: None,
+                validator: None,
+            }],
+            vec![],
+            // forbidden empty now (REAL_NAME removed)
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            2,
+        )
+        .unwrap();
+        let kind = v1.classify_amendment(&v2);
+        assert_eq!(kind, AmendmentKind::Mixed);
+        assert!(kind.requires_reconsent());
+    }
+
+    #[test]
+    fn classify_amendment_cosmetic_is_expansive() {
+        // Title/description change with no rule change → Expansive
+        // (no reductive signal).
+        let verse = deterministic_verse_key();
+        let v1 = ContractObject::sign(
+            &verse,
+            1,
+            "Old title",
+            "Old desc",
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            1,
+        )
+        .unwrap();
+        let v2 = ContractObject::sign(
+            &verse,
+            2,
+            "New title",
+            "Same shape",
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            2,
+        )
+        .unwrap();
+        let kind = v1.classify_amendment(&v2);
+        assert_eq!(kind, AmendmentKind::Expansive);
+        assert!(!kind.requires_reconsent());
     }
 
     #[test]
@@ -966,6 +1381,7 @@ mod tests {
             1,
             "x",
             "x",
+            vec![],
             vec![],
             vec![],
             vec![],

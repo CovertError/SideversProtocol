@@ -22,6 +22,22 @@ use crate::error::Result;
 use crate::relationships::{RelationshipTable, SideLifecycle, SideRelationship};
 use crate::side_store::{SideStore, StoredSide};
 
+/// Return the current unix-seconds timestamp, or log + return 0 on clock
+/// failure. Used for **local-only** state where a missing timestamp is
+/// cosmetic (e.g. `added_at` on a relationship, `observed_at` on a
+/// retired-sides entry). Wire-protocol timestamps that the receiver
+/// validates against freshness MUST propagate the error instead — never
+/// use this for envelope construction.
+fn now_or_log_zero() -> u64 {
+    match sidevers_core::envelope::now_unix_seconds() {
+        Ok(t) => t,
+        Err(e) => {
+            warn!("side: system clock unavailable, using 0: {e}");
+            0
+        }
+    }
+}
+
 /// One hosted side's complete state — keypair + signed objects (profile,
 /// retirement) + local view (relationships, retired_sides_seen, lifecycle)
 /// + co-holders (Track C). Cheap to clone (`Arc`-wrap externally).
@@ -75,7 +91,7 @@ impl Side {
         store: SideStore,
     ) -> Result<Self> {
         let address = side_key.public_bytes();
-        let now = sidevers_core::envelope::now_unix_seconds().unwrap_or(0);
+        let now = now_or_log_zero();
 
         match store.load_side(&address).await? {
             Some(s) => {
@@ -202,7 +218,7 @@ impl Side {
     // -----------------------------------------------------------------
 
     pub async fn mark_retired_seen(&self, retired: [u8; 32]) {
-        let now = sidevers_core::envelope::now_unix_seconds().unwrap_or(0);
+        let now = now_or_log_zero();
         if let Err(e) = self
             .store
             .add_retired_seen(&self.address, &retired, now)
@@ -285,7 +301,7 @@ impl Side {
             return;
         }
         let last = *self.last_send_at.lock().await;
-        let now = sidevers_core::envelope::now_unix_seconds().unwrap_or(0);
+        let now = now_or_log_zero();
         let next = SideLifecycle::derive(last, false, now);
         {
             let mut g = self.lifecycle.lock().await;
@@ -296,7 +312,7 @@ impl Side {
 
     /// Stamp `last_send_at` and advance Created → Active on first send.
     pub async fn touch_send(&self) {
-        let now = sidevers_core::envelope::now_unix_seconds().unwrap_or(0);
+        let now = now_or_log_zero();
         {
             let mut g = self.last_send_at.lock().await;
             *g = Some(now);
@@ -371,7 +387,7 @@ impl Side {
     // -----------------------------------------------------------------
 
     pub async fn add_co_holder(&self, device_pubkey: [u8; 32], added_by: Option<[u8; 32]>) {
-        let added_at = sidevers_core::envelope::now_unix_seconds().unwrap_or(0);
+        let added_at = now_or_log_zero();
         if let Err(e) = self
             .store
             .add_co_holder(&self.address, &device_pubkey, added_at, added_by.as_ref())
@@ -405,7 +421,7 @@ impl Side {
     }
 
     pub async fn add_revoked_device(&self, device_pubkey: [u8; 32]) {
-        let now = sidevers_core::envelope::now_unix_seconds().unwrap_or(0);
+        let now = now_or_log_zero();
         if let Err(e) = self
             .store
             .add_revoked_device(&self.address, &device_pubkey, now)
@@ -421,7 +437,7 @@ impl Side {
     }
 
     pub async fn add_pending_pairing(&self, nonce: [u8; 16]) {
-        let now = sidevers_core::envelope::now_unix_seconds().unwrap_or(0);
+        let now = now_or_log_zero();
         self.pending_pairings
             .lock()
             .await
@@ -429,7 +445,7 @@ impl Side {
     }
 
     pub async fn take_pending_pairing(&self, nonce: &[u8; 16]) -> Option<PendingPairing> {
-        let now = sidevers_core::envelope::now_unix_seconds().unwrap_or(0);
+        let now = now_or_log_zero();
         let mut g = self.pending_pairings.lock().await;
         // Sweep stale entries (>600s) opportunistically.
         g.retain(|_, p| now.saturating_sub(p.issued_at) < 600);
@@ -442,7 +458,7 @@ impl Side {
 
     /// Record / update the dial address for a co-holder device.
     pub async fn record_co_holder_addr(&self, device_pubkey: [u8; 32], dial_addr: String) {
-        let now = sidevers_core::envelope::now_unix_seconds().unwrap_or(0);
+        let now = now_or_log_zero();
         if let Err(e) = self
             .store
             .upsert_co_holder_addr(&self.address, &device_pubkey, &dial_addr, now)
@@ -542,6 +558,21 @@ impl Side {
                 device_pubkey,
                 dial_addr,
             } => {
+                // Loop / echo guard (audit C5): a CoHolderAdded delta
+                // that names the side itself OR a device already marked
+                // revoked is silently dropped. The first case prevents
+                // adding the side keypair to its own co-holder set
+                // (which the existing device's accept_pairing happens to
+                // do for itself); the second prevents a revoked device
+                // from being re-added by an out-of-date co-holder.
+                // Idempotency at apply_delta also means receiving the
+                // same op twice is harmless.
+                if *device_pubkey == self.address {
+                    return;
+                }
+                if self.revoked_devices.lock().await.contains(device_pubkey) {
+                    return;
+                }
                 self.add_co_holder(*device_pubkey, None).await;
                 self.record_co_holder_addr(*device_pubkey, dial_addr.clone())
                     .await;

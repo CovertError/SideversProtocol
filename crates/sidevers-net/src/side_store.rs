@@ -62,7 +62,11 @@ impl SideStore {
     pub async fn open(data_dir: &Path) -> Result<Self> {
         let path = data_dir.join("sides.db");
         tokio::fs::create_dir_all(data_dir).await.ok();
+        // Phase 1.H1 (audit-pass): tighten dir + file to owner-only
+        // before SQLite starts writing anything sensitive.
+        let _ = crate::fs_perms::lock_down_dir(data_dir);
         let conn = Connection::open(&path).map_err(map_sqlite)?;
+        let _ = crate::fs_perms::lock_down_file(&path);
         let store = SideStore {
             conn: Arc::new(Mutex::new(conn)),
         };
@@ -791,5 +795,67 @@ mod tests {
         // The migration runner short-circuits on existing schema_version row.
         let store2 = SideStore::open_memory().await.unwrap();
         assert!(store2.list_sides().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn v1_database_migrates_to_v2_without_data_loss() {
+        // Build a v1-shaped database by hand (using a fresh in-memory
+        // connection, NO migration), insert one row, then re-open via
+        // `SideStore::open` on the same path — the migration must add
+        // the v2 `co_holder_addrs` table without dropping the row.
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("sides.db");
+
+        // Phase 1: write v1 schema by hand.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_version (version INTEGER NOT NULL);
+                 INSERT INTO schema_version (version) VALUES (1);",
+            )
+            .unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            // Insert a synthetic v1 side row.
+            conn.execute(
+                "INSERT INTO sides (address, seed, label, created_at, lifecycle, last_send_at, is_self_retired)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    &[0xAB_u8; 32][..],
+                    &[0xCD_u8; 32][..],
+                    Some("legacy"),
+                    1_700_000_000_i64,
+                    "Active",
+                    Option::<i64>::None,
+                    0_i64,
+                ],
+            )
+            .unwrap();
+        }
+
+        // Phase 2: re-open with the current binary; migration runs.
+        let store = SideStore::open(tmp.path()).await.unwrap();
+
+        // The v1 row survives.
+        let sides = store.list_sides().await.unwrap();
+        assert_eq!(sides.len(), 1);
+        assert_eq!(sides[0].address, [0xAB; 32]);
+        assert_eq!(sides[0].label.as_deref(), Some("legacy"));
+
+        // The v2 `co_holder_addrs` table is now usable.
+        store
+            .upsert_co_holder_addr(&[0xAB; 32], &[0xEE; 32], "127.0.0.1:12345", 100)
+            .await
+            .unwrap();
+        let addrs = store.list_co_holder_addrs(&[0xAB; 32]).await.unwrap();
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0].0, [0xEE; 32]);
+        assert_eq!(addrs[0].1, "127.0.0.1:12345");
+
+        // Schema version is now 2.
+        let conn = store.conn.lock().await;
+        let v: i64 = conn
+            .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
     }
 }

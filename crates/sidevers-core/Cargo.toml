@@ -30,3 +30,12 @@ hex = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "crypto"
+harness = false
+
+[[bench]]
+name = "envelope"
+harness = false

@@ -12,6 +12,7 @@ pub mod address;
 pub mod cbor;
 pub mod envelope;
 pub mod error;
+pub mod features;
 pub mod keys;
 pub mod linkage;
 pub mod messages;
@@ -22,6 +23,7 @@ pub mod verse;
 pub use address::{Address, AddressKind};
 pub use envelope::{Envelope, MessageType, PROTOCOL_VERSION};
 pub use error::{Error, Result};
+pub use features::{FeatureRegistry, FeatureState, phase1_baseline};
 pub use keys::{MasterKey, SideKey, SideLabel};
 pub use messages::device::{
     DeltaOp, DeviceRevokePayload, PAIRING_NONCE_LEN, PairingQr, PairingRequestPayload,
@@ -29,3 +31,4 @@ pub use messages::device::{
 };
 pub use messages::profile::{ProfilePayload, capability};
 pub use messages::retirement::SideRetirementPayload;
+pub use messages::storage_prefs::StoragePreferences;

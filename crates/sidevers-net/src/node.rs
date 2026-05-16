@@ -8,8 +8,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use sidevers_core::Envelope;
-use sidevers_core::envelope::{NONCE_LEN, random_nonce};
+use sidevers_core::envelope::{NONCE_LEN, now_unix_seconds, random_nonce};
 use sidevers_core::keys::SideKey;
+use sidevers_core::linkage::LinkageProof;
 use sidevers_core::messages::device::{
     DeltaOp, DeviceRevokePayload, PairingQr, PairingRequestPayload, RelationshipRecord,
     STATE_BUNDLE_AAD, StateBundleInner, StateBundlePayload, StateDeltaPayload,
@@ -25,7 +26,7 @@ use sidevers_core::messages::verse::{
     VerseReconsentPayload, VerseRemovePayload,
 };
 use sidevers_core::payload as core_payload;
-use sidevers_core::replay::ReplayCache;
+use sidevers_core::replay::{DEFAULT_TTL_SECS, ReplayCache};
 use sidevers_core::verse::{ContractObject, MembershipToken, VerseContentKey};
 use sidevers_core::{Address, AddressKind, MessageType};
 use sidevers_storage::ObjectStore;
@@ -34,14 +35,21 @@ use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
+use crate::connection_pool::ConnectionPool;
 use crate::error::{Error, Result};
 use crate::forward::Mailbox;
 use crate::framing::{recv_envelope, send_envelope};
 use crate::gossip::GossipState;
+use crate::gossip_policy::{GossipPolicy, GossipPropagation};
 use crate::handshake::{run_initiator, run_responder};
+use crate::handshake_limit::HandshakeLimiter;
 use crate::hygiene::apply_publish_jitter;
+use crate::metrics::Metrics;
 use crate::peers::{PeerTable, unix_now};
+use crate::provenance::PublisherTable;
 use crate::relationships::{SideLifecycle, SideRelationship};
+use crate::replay_journal::SqliteReplayJournal;
+use crate::reputation::ReputationTable;
 use crate::session::{Intent, Session};
 use crate::side::Side;
 use crate::side_store::SideStore;
@@ -72,6 +80,17 @@ pub struct ProfileDelivered {
     pub profile: ProfilePayload,
 }
 
+/// A `LINKAGE_PUBLISH` envelope received and verified (both signatures
+/// good). Spec §2.7. The accompanying `LinkageProof` is structurally
+/// valid; consumers can decide independently whether to trust the link
+/// (the cryptographic fact "side_a and side_b both signed this" is all
+/// the protocol guarantees).
+#[derive(Debug, Clone)]
+pub struct LinkageProofReceived {
+    pub envelope: Envelope,
+    pub proof: LinkageProof,
+}
+
 /// Per-node services threaded through the accept loop and handlers.
 #[derive(Clone)]
 struct Services {
@@ -90,18 +109,48 @@ struct Services {
     /// Currently-active inbound gossip sessions — used to fan novel
     /// broadcasts out to subscribers. Keyed on the peer's side public key.
     active_gossip: Arc<Mutex<HashMap<[u8; 32], quinn::Connection>>>,
-    /// Optional: a verse this node hosts. Phase 1.5a allows at most one.
-    hosted_verse: Arc<Mutex<Option<VerseHost>>>,
+    /// Phase 1.5.E: every verse this node hosts, keyed by verse address.
+    /// Pre-1.5.E was `Option<VerseHost>` (one per node); now a Node can
+    /// host multiple verses simultaneously and dispatch routes by the
+    /// verse address embedded in the incoming envelope's payload.
+    hosted_verses: Arc<Mutex<HashMap<[u8; 32], VerseHost>>>,
+    /// Per-peer reputation + token-bucket rate limit (spec §6.9). Consulted
+    /// at envelope-entry on every inbound; misbehaving peers get
+    /// envelopes silently dropped before any per-envelope work.
+    reputation: ReputationTable,
+    /// Per-source-IP handshake rate limiter (spec §4.6). Consulted at
+    /// QUIC accept; sources over budget get their connection closed
+    /// without running the responder handshake, sparing CPU + entropy.
+    handshake_limit: HandshakeLimiter,
+    /// Per-object publisher set (Phase 1.C3, spec §5.6). Tracks which
+    /// peers have offered each content-addressed object so a subsequent
+    /// STORAGE_RETRACT can only narrow the publisher list, not drop an
+    /// object that other publishers still back.
+    provenance: PublisherTable,
+    /// Gossip-fanout policy (Phase 1.A3, spec §6.9.3). Consulted in
+    /// `fanout_broadcast` to decide which currently-connected peers
+    /// should receive a relayed broadcast. Default `Open` matches
+    /// pre-1.A3 behavior; an operator can tighten via
+    /// `Node::set_gossip_policy`.
+    gossip_policy: Arc<Mutex<GossipPolicy>>,
+    /// Phase 1.H3: process-wide counters surfaced over the optional
+    /// Prometheus `/metrics` endpoint.
+    metrics: Metrics,
     dm_tx: mpsc::Sender<DirectMessageReceived>,
     gossip_tx: mpsc::Sender<Envelope>,
     verse_post_tx: mpsc::Sender<VersePostReceived>,
     profile_tx: mpsc::Sender<ProfileDelivered>,
+    linkage_tx: mpsc::Sender<LinkageProofReceived>,
 }
 
 pub struct Node {
     endpoint: quinn::Endpoint,
     services: Services,
     listen_addr: SocketAddr,
+    /// Phase 1.H4 connection pool — `dial_pooled` reuses an alive
+    /// `quinn::Connection` to a peer instead of paying the full TLS +
+    /// QUIC handshake every time. Keyed on `(peer_addr, source_side)`.
+    pool: ConnectionPool,
     /// Per-side SQLite store, shared with every secondary side added via
     /// `add_side`. Phase 1.5f Track A.
     side_store: SideStore,
@@ -113,6 +162,7 @@ pub struct Node {
     gossip_rx: Mutex<mpsc::Receiver<Envelope>>,
     verse_post_rx: Mutex<mpsc::Receiver<VersePostReceived>>,
     profile_rx: Mutex<mpsc::Receiver<ProfileDelivered>>,
+    linkage_rx: Mutex<mpsc::Receiver<LinkageProofReceived>>,
     accept_handle: JoinHandle<()>,
 }
 
@@ -137,7 +187,21 @@ impl Node {
         let label = Some(side.label().as_str().to_owned());
         let side_obj = Arc::new(Side::load_or_create(side, label, side_store.clone()).await?);
         let side_arc = side_obj.keypair_arc();
-        let replay = Arc::new(Mutex::new(ReplayCache::new()));
+
+        // Phase 1.E: replay cache is bounded + persisted. Open the SQLite
+        // journal alongside the side store, drain still-fresh entries
+        // into the in-memory cache, then attach the journal so future
+        // observations are recorded durably. A restart inside the TTL
+        // window therefore still detects a replayed envelope.
+        let journal = Arc::new(SqliteReplayJournal::open(data_dir)?);
+        let now = now_unix_seconds().map_err(Error::Core)?;
+        let preload_entries = journal
+            .load_active(now, DEFAULT_TTL_SECS)
+            .unwrap_or_default();
+        let mut cache = ReplayCache::new();
+        cache.preload(now, preload_entries);
+        cache.set_journal(journal);
+        let replay = Arc::new(Mutex::new(cache));
         let peers = PeerTable::default();
         let mailbox = Mailbox::new();
         let gossip = GossipState::new();
@@ -146,6 +210,7 @@ impl Node {
         let (gossip_tx, gossip_rx) = mpsc::channel::<Envelope>(128);
         let (verse_post_tx, verse_post_rx) = mpsc::channel::<VersePostReceived>(128);
         let (profile_tx, profile_rx) = mpsc::channel::<ProfileDelivered>(32);
+        let (linkage_tx, linkage_rx) = mpsc::channel::<LinkageProofReceived>(32);
 
         let services = Services {
             side: side_arc,
@@ -156,11 +221,17 @@ impl Node {
             mailbox,
             gossip,
             active_gossip: Arc::new(Mutex::new(HashMap::new())),
-            hosted_verse: Arc::new(Mutex::new(None)),
+            hosted_verses: Arc::new(Mutex::new(HashMap::new())),
+            reputation: ReputationTable::default(),
+            handshake_limit: HandshakeLimiter::default(),
+            provenance: PublisherTable::new(),
+            gossip_policy: Arc::new(Mutex::new(GossipPolicy::default())),
+            metrics: Metrics::new(),
             dm_tx,
             gossip_tx,
             verse_post_tx,
             profile_tx,
+            linkage_tx,
         };
 
         let accept_handle = tokio::spawn(accept_loop(endpoint.clone(), services.clone()));
@@ -169,12 +240,14 @@ impl Node {
             endpoint,
             services,
             listen_addr: local,
+            pool: ConnectionPool::new(),
             side_store,
             extras: Arc::new(Mutex::new(Vec::new())),
             dm_rx: Mutex::new(dm_rx),
             gossip_rx: Mutex::new(gossip_rx),
             verse_post_rx: Mutex::new(verse_post_rx),
             profile_rx: Mutex::new(profile_rx),
+            linkage_rx: Mutex::new(linkage_rx),
             accept_handle,
         })
     }
@@ -208,8 +281,17 @@ impl Node {
             mailbox: self.services.mailbox.clone(),
             gossip: self.services.gossip.clone(),
             active_gossip: Arc::new(Mutex::new(HashMap::new())),
-            hosted_verse: Arc::new(Mutex::new(None)),
+            // Extra sides on the same node still host independent
+            // verses; the secondary endpoint accepts Verse-intent for
+            // any verse the operator registers on it via `host_verse`.
+            hosted_verses: Arc::new(Mutex::new(HashMap::new())),
+            reputation: self.services.reputation.clone(),
+            handshake_limit: self.services.handshake_limit.clone(),
+            provenance: self.services.provenance.clone(),
+            gossip_policy: self.services.gossip_policy.clone(),
+            metrics: self.services.metrics.clone(),
             dm_tx: self.services.dm_tx.clone(),
+            linkage_tx: self.services.linkage_tx.clone(),
             gossip_tx: self.services.gossip_tx.clone(),
             verse_post_tx: self.services.verse_post_tx.clone(),
             profile_tx: self.services.profile_tx.clone(),
@@ -262,6 +344,107 @@ impl Node {
         None
     }
 
+    /// Phase 1.H4: like [`dial`](Self::dial) but reuses a cached
+    /// `quinn::Connection` to `peer_addr` (from the primary side) if
+    /// one is still alive. Falls back to a fresh dial otherwise. Cuts
+    /// the per-call cost of repeated peer interactions to just the
+    /// inner Sidevers handshake.
+    pub async fn dial_pooled(&self, peer_addr: SocketAddr, intent: Intent) -> Result<Session> {
+        let side_pk = self.services.side.public_bytes();
+        if let Some(conn) = self.pool.get(peer_addr, &side_pk).await {
+            // Run a fresh inner handshake on the cached transport. If
+            // the protocol handshake itself fails, the connection is
+            // likely dead — drop from the pool and retry once via
+            // `dial`.
+            match run_initiator(&conn, &self.services.side, intent, None).await {
+                Ok(session) => {
+                    self.services
+                        .peers
+                        .insert(PeerInfo {
+                            address: session.peer_side,
+                            intents: vec![intent.as_u8()],
+                            endpoints: vec![peer_addr.to_string()],
+                            last_seen: unix_now(),
+                        })
+                        .await;
+                    return Ok(session);
+                }
+                Err(e) => {
+                    debug!(
+                        ?e,
+                        "dial_pooled: handshake on cached connection failed; falling back to fresh dial"
+                    );
+                    self.pool.invalidate(peer_addr, &side_pk).await;
+                }
+            }
+        }
+        self.dial(peer_addr, intent).await
+    }
+
+    /// Handle to the QUIC connection pool (Phase 1.H4). Tests inspect
+    /// `len()` to confirm reuse; ops can `clear()` to force a fresh
+    /// transport on next dial.
+    pub fn connection_pool(&self) -> ConnectionPool {
+        self.pool.clone()
+    }
+
+    /// Phase 1.B1: NAT-hole-punching dial. Retries `Node::dial` up to
+    /// `config.attempts` times with a tight per-attempt timeout. Each
+    /// attempt sends fresh QUIC Initial packets which open / refresh
+    /// the outbound NAT mapping; if the peer is also dialing back
+    /// (coordinated via the rendezvous broker), one attempt lands.
+    ///
+    /// For full-cone / restricted-cone NATs this works. Symmetric NATs
+    /// would need STUN-style port prediction (deferred).
+    pub async fn hole_punch_dial(
+        &self,
+        peer_addr: SocketAddr,
+        intent: Intent,
+        config: crate::hole_punch::HolePunchConfig,
+    ) -> Result<Session> {
+        crate::hole_punch::hole_punch_with(config, peer_addr, intent, |addr, intent| async move {
+            self.dial(addr, intent).await
+        })
+        .await
+    }
+
+    /// Like [`dial`](Self::dial) but uses a specific hosted side (primary or
+    /// secondary) as the local identity. Each hosted side runs on its own
+    /// QUIC endpoint per spec §7.6 — this dials out via that side's
+    /// endpoint so the peer sees the right source address and pubkey.
+    pub async fn dial_from(
+        &self,
+        side_addr: &[u8; 32],
+        peer_addr: SocketAddr,
+        intent: Intent,
+    ) -> Result<Session> {
+        // Primary side reuses the node-level endpoint.
+        if &self.services.side.public_bytes() == side_addr {
+            return self.dial(peer_addr, intent).await;
+        }
+        let (side_key, endpoint) = {
+            let extras = self.extras.lock().await;
+            let h = extras
+                .iter()
+                .find(|h| &h.side.address == side_addr)
+                .ok_or(Error::Invariant("dial_from: side not hosted"))?;
+            (h.side.keypair_arc(), h.endpoint.clone())
+        };
+        let connecting = endpoint.connect(peer_addr, "sidevers")?;
+        let conn = connecting.await?;
+        let session = run_initiator(&conn, &side_key, intent, None).await?;
+        self.services
+            .peers
+            .insert(PeerInfo {
+                address: session.peer_side,
+                intents: vec![intent.as_u8()],
+                endpoints: vec![peer_addr.to_string()],
+                last_seen: unix_now(),
+            })
+            .await;
+        Ok(session)
+    }
+
     // -----------------------------------------------------------------
     // Multi-device pairing (§7.5) — Phase 1.5f Track C
     // -----------------------------------------------------------------
@@ -296,6 +479,20 @@ impl Node {
     /// PAIRING_REQUEST / STATE_BUNDLE, install the side locally. The
     /// returned `Arc<Side>` is now hosted on this Node on its own
     /// endpoint.
+    ///
+    /// # Errors
+    /// - `Error::Invariant` for malformed QR, mismatched recipient
+    ///   pubkey, mismatched pairing nonce, or bundle that decrypts to a
+    ///   side seed not matching `qr.side`.
+    /// - Bundle wait times out after 10 s if the existing device never
+    ///   responds.
+    /// - Underlying `quinn` / `Core` errors via `From`.
+    #[tracing::instrument(
+        name = "pairing.accept",
+        skip(self, qr),
+        fields(side = %hex::encode(qr.side), dial_addr = %qr.dial_addr),
+        err
+    )]
     pub async fn accept_pairing(&self, qr: PairingQr) -> Result<(Arc<Side>, SocketAddr)> {
         // 1. Generate a fresh ephemeral device key (Ed25519).
         let ephemeral_master = sidevers_core::keys::MasterKey::generate().map_err(Error::Core)?;
@@ -527,6 +724,15 @@ impl Node {
     /// Best-effort: dial failures are logged but not surfaced. Each push
     /// runs as a detached `tokio::spawn` so the calling mutator returns
     /// without blocking on the network.
+    ///
+    /// No-op if the side isn't hosted, has no co-holders, or `ops` is
+    /// empty. Logs at `WARN` for sign failures; `DEBUG` for dial /
+    /// handshake / send failures.
+    #[tracing::instrument(
+        name = "delta.push",
+        skip(self, ops),
+        fields(side = %hex::encode(side_addr), op_count = ops.len())
+    )]
     pub async fn push_delta_to_co_holders(&self, side_addr: &[u8; 32], ops: Vec<DeltaOp>) {
         let side = match self.side_by_address(side_addr).await {
             Some(s) => s,
@@ -580,12 +786,22 @@ impl Node {
                         return;
                     }
                 };
+                // Wire-protocol timestamps MUST be from a real clock: a
+                // timestamp of 0 would be ~50 years stale and the receiver
+                // would reject via `check_freshness_and_replay`.
+                let ts = match sidevers_core::envelope::now_unix_seconds() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        warn!("push_delta: system clock unavailable: {e}");
+                        return;
+                    }
+                };
                 let env = match Envelope::sign_with(
                     MessageType::STATE_DELTA,
                     &side_key,
                     Some(session.peer_side),
                     payload,
-                    sidevers_core::envelope::now_unix_seconds().unwrap_or(0),
+                    ts,
                     match random_nonce() {
                         Ok(n) => n,
                         Err(_) => return,
@@ -605,11 +821,51 @@ impl Node {
         }
     }
 
-    /// Register a hosted verse with this node. Verse-intent connections from
-    /// peers will be served using this state. Phase 1.5a allows at most one.
+    /// Register a hosted verse with this node. Verse-intent connections
+    /// from peers will be served using this state. Phase 1.5.E supports
+    /// multiple simultaneously hosted verses — `host_verse` may be
+    /// called repeatedly with different verses. Calling it twice with
+    /// the same `verse.verse_key` replaces the existing host.
     pub async fn host_verse(&self, verse: VerseHost) {
-        let mut g = self.services.hosted_verse.lock().await;
-        *g = Some(verse);
+        let addr = verse.with(|inner| inner.verse_key.public_bytes()).await;
+        let mut g = self.services.hosted_verses.lock().await;
+        g.insert(addr, verse);
+    }
+
+    /// Snapshot the verse addresses this node currently hosts.
+    pub async fn hosted_verse_addresses(&self) -> Vec<[u8; 32]> {
+        self.services
+            .hosted_verses
+            .lock()
+            .await
+            .keys()
+            .copied()
+            .collect()
+    }
+
+    /// Look up a hosted verse by its address.
+    pub async fn hosted_verse(&self, verse_addr: &[u8; 32]) -> Option<VerseHost> {
+        self.services
+            .hosted_verses
+            .lock()
+            .await
+            .get(verse_addr)
+            .cloned()
+    }
+
+    /// Phase 1.5.A: eagerly rotate the verse content key and push the
+    /// new sealed key to every currently-connected member, without
+    /// waiting for a leave / remove event. Use this on a schedule
+    /// (e.g. weekly) so a long-lived membership can't accumulate
+    /// arbitrary plaintext under a single content key.
+    ///
+    /// Returns `Err` if the named verse isn't hosted on this node.
+    pub async fn host_rotate_verse_key(&self, verse_addr: &[u8; 32]) -> Result<()> {
+        let host = self
+            .hosted_verse(verse_addr)
+            .await
+            .ok_or(Error::Invariant("rotate: verse not hosted"))?;
+        rotate_and_push_verse_key(&host).await
     }
 
     /// Wait for the next decrypted verse post that arrived on this node's
@@ -628,11 +884,15 @@ impl Node {
     /// themselves; only membership changes (leave / remove) do. Returns
     /// `Err` if no verse is hosted.
     pub async fn host_amend_verse(&self, new_contract: ContractObject) -> Result<()> {
+        // Phase 1.5.E: amend operates on the verse identified by the
+        // new contract's `verse` field. Pre-1.5.E this picked "the one
+        // hosted verse"; we now look up by address so multi-verse
+        // hosts can amend any verse they host.
         let host = {
-            let g = self.services.hosted_verse.lock().await;
-            match g.as_ref() {
+            let g = self.services.hosted_verses.lock().await;
+            match g.get(&new_contract.verse) {
                 Some(h) => h.clone(),
-                None => return Err(Error::Invariant("no hosted verse to amend")),
+                None => return Err(Error::Invariant("no hosted verse for that contract.verse")),
             }
         };
         // Update the host's contract in place.
@@ -697,6 +957,46 @@ impl Node {
         self.services.peers.clone()
     }
 
+    /// Handle to the per-peer reputation table (spec §6.9 Tier-1
+    /// anti-spam). Useful for snapshotting a peer's counters, manually
+    /// refusing a peer, or reinstating a refused peer.
+    pub fn reputation(&self) -> ReputationTable {
+        self.services.reputation.clone()
+    }
+
+    /// Handle to the per-source-IP handshake rate limiter (spec §4.6).
+    /// Tests inspect this to confirm a throttled peer's bucket; ops can
+    /// inspect `tracked()` for cardinality.
+    pub fn handshake_limit(&self) -> HandshakeLimiter {
+        self.services.handshake_limit.clone()
+    }
+
+    /// Snapshot the set of sides currently recorded as publishers of
+    /// the content-addressed object `hash` (Phase 1.C3, spec §5.6).
+    /// Used by tests to assert retract provenance behavior; ops can
+    /// inspect it for diagnostics.
+    pub async fn publisher_set(&self, hash: &[u8; 32]) -> std::collections::BTreeSet<[u8; 32]> {
+        self.services.provenance.publishers(hash).await
+    }
+
+    /// Get the current gossip-fanout policy (Phase 1.A3, spec §6.9.3).
+    pub async fn gossip_policy(&self) -> GossipPolicy {
+        *self.services.gossip_policy.lock().await
+    }
+
+    /// Set the gossip-fanout policy. Takes effect on the next
+    /// inbound broadcast that triggers fanout.
+    pub async fn set_gossip_policy(&self, policy: GossipPolicy) {
+        *self.services.gossip_policy.lock().await = policy;
+    }
+
+    /// Handle to the process-wide [`Metrics`] (Phase 1.H3). Clone is
+    /// cheap; clones share the same underlying counters. Spawn the
+    /// HTTP endpoint via `metrics().serve_on(addr).await`.
+    pub fn metrics(&self) -> Metrics {
+        self.services.metrics.clone()
+    }
+
     pub fn mailbox(&self) -> Mailbox {
         self.services.mailbox.clone()
     }
@@ -717,6 +1017,11 @@ impl Node {
         let connecting = self.endpoint.connect(peer_addr, "sidevers")?;
         let conn = connecting.await?;
         let session = run_initiator(&conn, &self.services.side, intent, None).await?;
+        // Cache the underlying transport for future dial_pooled calls.
+        self.pool
+            .insert(peer_addr, self.services.side.public_bytes(), conn.clone())
+            .await;
+        let _ = conn;
         // Note the freshly-handshaked peer in our local peer table.
         self.services
             .peers
@@ -782,6 +1087,13 @@ impl Node {
         rx.recv().await
     }
 
+    /// Wait for the next `LINKAGE_PUBLISH` envelope (spec §2.7). Both
+    /// signatures inside have already verified by the time this returns.
+    pub async fn next_linkage_proof(&self) -> Option<LinkageProofReceived> {
+        let mut rx = self.linkage_rx.lock().await;
+        rx.recv().await
+    }
+
     /// Install the profile this node publishes for its hosted side.
     /// Subsequent `PROFILE_FETCH` requests addressed to this side will
     /// reply with the signed profile; the declared capabilities (§7.7)
@@ -817,6 +1129,27 @@ impl Node {
         let record =
             SideRetirementPayload::sign(&self.services.side, now, reason).map_err(Error::Core)?;
         self.services.side_state.set_self_retired().await;
+        Ok(record)
+    }
+
+    /// Phase 3.C / Phase 1.5.f: retire a specific hosted side (not
+    /// necessarily the primary). Looks up the side by address, signs
+    /// a retirement record with its keypair, and flips its lifecycle
+    /// to `Retired`. Returns `Err` if the address isn't hosted here.
+    pub async fn retire_side(
+        &self,
+        side_addr: &[u8; 32],
+        reason: Option<String>,
+    ) -> Result<SideRetirementPayload> {
+        let side = self
+            .side_by_address(side_addr)
+            .await
+            .ok_or(Error::Invariant("retire_side: side not hosted"))?;
+        let now = sidevers_core::envelope::now_unix_seconds().map_err(Error::Core)?;
+        let keypair = side.keypair_arc();
+        let record = SideRetirementPayload::sign(&keypair, now, reason).map_err(Error::Core)?;
+        side.set_lifecycle(crate::relationships::SideLifecycle::Retired)
+            .await;
         Ok(record)
     }
 
@@ -966,6 +1299,11 @@ impl Node {
     }
 }
 
+#[tracing::instrument(
+    name = "accept.loop",
+    skip(endpoint, services),
+    fields(side = %hex::encode(services.side.public_bytes())),
+)]
 async fn accept_loop(endpoint: quinn::Endpoint, services: Services) {
     while let Some(incoming) = endpoint.accept().await {
         let services = services.clone();
@@ -984,7 +1322,24 @@ async fn accept_loop(endpoint: quinn::Endpoint, services: Services) {
     }
 }
 
+#[tracing::instrument(
+    name = "handle.connection",
+    skip(conn, services),
+    fields(remote = %conn.remote_address()),
+    err
+)]
 async fn handle_connection(conn: quinn::Connection, services: Services) -> Result<()> {
+    // Phase 1.D / §4.6: per-source-IP handshake rate limit. Refusing
+    // here saves the responder X25519 + signature work for sources
+    // pumping new connections; the QUIC connection is dropped without
+    // even accepting the handshake bi-stream.
+    let remote_ip = conn.remote_address().ip();
+    if !services.handshake_limit.try_acquire(remote_ip).await {
+        debug!(ip = %remote_ip, "handshake throttled: too many recent connections from this source");
+        services.metrics.incr_handshake_throttled();
+        conn.close(0u32.into(), b"handshake rate limit");
+        return Ok(());
+    }
     let (mut hs_send, mut hs_recv) = conn.accept_bi().await?;
     let session = run_responder(&mut hs_send, &mut hs_recv, &services.side, &conn).await?;
 
@@ -1012,6 +1367,12 @@ async fn handle_connection(conn: quinn::Connection, services: Services) -> Resul
     }
 }
 
+#[tracing::instrument(
+    name = "serve.direct",
+    skip(session, services),
+    fields(peer = %hex::encode(session.peer_side)),
+    err
+)]
 async fn serve_direct(session: Session, services: Services) -> Result<()> {
     loop {
         let (mut send, _recv, env) = match session.accept_one().await {
@@ -1022,7 +1383,13 @@ async fn serve_direct(session: Session, services: Services) -> Result<()> {
             | Err(Error::Connection(quinn::ConnectionError::TimedOut)) => return Ok(()),
             Err(e) => return Err(e),
         };
-        if !check_freshness_and_replay(&env, &services.replay).await {
+        if !check_reputation_gate(&env, &services).await {
+            debug!("envelope dropped: peer rate-limited or refused");
+            continue;
+        }
+        if !check_freshness_and_replay_metered(&env, &services.replay, Some(&services.metrics))
+            .await
+        {
             warn!("dm rejected: stale or replayed");
             continue;
         }
@@ -1065,6 +1432,7 @@ async fn serve_direct(session: Session, services: Services) -> Result<()> {
                         plaintext,
                     })
                     .await;
+                services.metrics.incr_dm_received();
             }
             MessageType::PROFILE_FETCH => {
                 // Payload: 32-byte side address being queried. Answer only
@@ -1132,6 +1500,37 @@ async fn serve_direct(session: Session, services: Services) -> Result<()> {
                     continue;
                 }
                 services.side_state.mark_retired_seen(record.side).await;
+            }
+            MessageType::LINKAGE_PUBLISH => {
+                // §2.7: the envelope payload is the canonical CBOR of a
+                // LinkageProof. `from_wire_bytes` already validates both
+                // signatures and rejects non-canonical encodings. The
+                // sender (envelope.from) must be one of the two linked
+                // sides — otherwise a third party could relay a proof
+                // they didn't sign, which is fine cryptographically but
+                // confusing semantically.
+                let proof = match LinkageProof::from_wire_bytes(&env.payload) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn!("LINKAGE_PUBLISH decode/verify failed: {e}");
+                        continue;
+                    }
+                };
+                if env.from != proof.side_a && env.from != proof.side_b {
+                    debug!(
+                        "LINKAGE_PUBLISH: sender ({}) is neither linked side; dropping",
+                        hex::encode(env.from)
+                    );
+                    continue;
+                }
+                let _ = services
+                    .linkage_tx
+                    .send(LinkageProofReceived {
+                        envelope: env,
+                        proof,
+                    })
+                    .await;
+                services.metrics.incr_linkage_proof_received();
             }
             MessageType::DEVICE_PAIRING_REQUEST => {
                 // §7.5: the existing device receives a pairing request from
@@ -1318,6 +1717,12 @@ async fn build_state_bundle_inner(services: &Services) -> Result<StateBundleInne
     }
     .to_owned();
 
+    // Informational only — the new device uses this to track when state
+    // was bundled, but doesn't reject based on the value.
+    let bundled_at = sidevers_core::envelope::now_unix_seconds().unwrap_or_else(|e| {
+        warn!("build_state_bundle_inner: system clock unavailable: {e}");
+        0
+    });
     Ok(StateBundleInner {
         side_seed: side.to_seed(),
         profile_wire,
@@ -1325,10 +1730,16 @@ async fn build_state_bundle_inner(services: &Services) -> Result<StateBundleInne
         retired_sides,
         lifecycle,
         co_holders,
-        bundled_at: sidevers_core::envelope::now_unix_seconds().unwrap_or(0),
+        bundled_at,
     })
 }
 
+#[tracing::instrument(
+    name = "serve.storage",
+    skip(session, services),
+    fields(peer = %hex::encode(session.peer_side)),
+    err
+)]
 async fn serve_storage(session: Session, services: Services) -> Result<()> {
     loop {
         let (mut send, mut recv, env) = match session.accept_one().await {
@@ -1339,7 +1750,13 @@ async fn serve_storage(session: Session, services: Services) -> Result<()> {
             | Err(Error::Connection(quinn::ConnectionError::TimedOut)) => return Ok(()),
             Err(e) => return Err(e),
         };
-        if !check_freshness_and_replay(&env, &services.replay).await {
+        if !check_reputation_gate(&env, &services).await {
+            debug!("envelope dropped: peer rate-limited or refused");
+            continue;
+        }
+        if !check_freshness_and_replay_metered(&env, &services.replay, Some(&services.metrics))
+            .await
+        {
             warn!("storage envelope rejected: stale or replayed");
             continue;
         }
@@ -1422,6 +1839,11 @@ async fn serve_storage(session: Session, services: Services) -> Result<()> {
                 match services.store.put(have.bytes).await {
                     Ok(addr) if addr == offer.reference.hash => {
                         debug!("storage: ingested 0x{:02x}…", addr[0]);
+                        // Phase 1.C3: note the offering peer as a publisher
+                        // of this object. A subsequent retract from this
+                        // same peer can narrow / drop the object; retracts
+                        // from anyone else are now refused.
+                        services.provenance.note_publisher(&addr, &env.from).await;
                     }
                     Ok(_) => warn!("storage offer: ingested hash mismatch"),
                     Err(e) => warn!("storage offer: ingest failed: {e}"),
@@ -1429,13 +1851,13 @@ async fn serve_storage(session: Session, services: Services) -> Result<()> {
                 send.finish().ok();
             }
             MessageType::STORAGE_RETRACT => {
-                // §5.6: retract is a signed statement from the publisher
-                // asking honest nodes to stop serving an object. The spec
-                // explicitly says we cannot compel; we can ask. Phase 1.5d:
-                // we honor the retract by removing the local copy (best-
-                // effort — we don't track per-publisher provenance, so this
-                // is overbroad if multiple publishers reference the same
-                // content-addressed bytes).
+                // §5.6 + Phase 1.C3: retract is a signed statement from
+                // the publisher asking honest nodes to stop serving an
+                // object. We track who has offered each hash to us
+                // (publisher provenance) so an unrelated peer cannot
+                // cause us to drop an object they never owned. Only
+                // when *every* recorded publisher has retracted do we
+                // actually unpin.
                 let retract = match StorageRetractPayload::decode(&env.payload) {
                     Ok(r) => r,
                     Err(e) => {
@@ -1443,12 +1865,37 @@ async fn serve_storage(session: Session, services: Services) -> Result<()> {
                         continue;
                     }
                 };
+                if !services
+                    .provenance
+                    .has_publisher(&retract.hash, &env.from)
+                    .await
+                {
+                    debug!(
+                        "storage retract: sender ({}) never published 0x{:02x}…; ignoring",
+                        hex::encode(env.from),
+                        retract.hash[0]
+                    );
+                    services.metrics.incr_storage_retract_ignored();
+                    continue;
+                }
+                let others_remain = services
+                    .provenance
+                    .drop_publisher(&retract.hash, &env.from)
+                    .await;
+                if others_remain {
+                    debug!(
+                        "storage retract: {} dropped; other publishers still back 0x{:02x}…",
+                        hex::encode(env.from),
+                        retract.hash[0]
+                    );
+                    continue;
+                }
                 if services.store.has(&retract.hash).await.unwrap_or(false) {
-                    // ObjectStore doesn't expose an explicit `remove`; we use
-                    // unpin + leave the entry. Real removal is a Phase-2
-                    // storage refinement.
                     let _ = services.store.unpin(&retract.hash).await;
-                    debug!("storage retract: unpinned 0x{:02x}…", retract.hash[0]);
+                    debug!(
+                        "storage retract: last publisher retracted; unpinned 0x{:02x}…",
+                        retract.hash[0]
+                    );
                 }
             }
             other => {
@@ -1461,6 +1908,12 @@ async fn serve_storage(session: Session, services: Services) -> Result<()> {
 /// Serve a Gossip-intent connection: peer-exchange, rendezvous, forward,
 /// and broadcast public messages. Deliver any pending forwards for this
 /// peer up-front before entering the accept loop.
+#[tracing::instrument(
+    name = "serve.gossip",
+    skip(session, services),
+    fields(peer = %hex::encode(session.peer_side)),
+    err
+)]
 async fn serve_gossip(session: Session, services: Services) -> Result<()> {
     // Track this connection for fan-out of novel broadcasts.
     {
@@ -1469,21 +1922,53 @@ async fn serve_gossip(session: Session, services: Services) -> Result<()> {
     }
     let _guard = scopeguard_gossip(services.active_gossip.clone(), session.peer_side);
 
-    // 1. Deliver any pending forwards for this peer.
+    // 1. Deliver any pending forwards for this peer. Phase 1.B2:
+    //    failures are not silently dropped — any held message we
+    //    can't push back over the open session is re-stored so a
+    //    later reconnect can retry it (subject to the original TTL,
+    //    not refreshed).
     let held = services.mailbox.drain(&session.peer_side).await;
+    let now = unix_now();
     for msg in held {
+        // Skip messages that have already expired in flight (unlikely
+        // but cheap to check).
+        if msg.expires_at <= now {
+            continue;
+        }
         let payload = ForwardDeliverPayload {
-            envelope: msg.envelope,
+            envelope: msg.envelope.clone(),
             stored_at: msg.stored_at,
         };
-        let env = sign_response(
+        let env = match sign_response(
             &services.side,
             &session.peer_side,
             MessageType::FORWARD_DELIVER,
             payload.encode(),
-        )?;
-        if let Ok((mut send, _recv)) = session.open_and_send(&env).await {
-            send.finish().ok();
+        ) {
+            Ok(e) => e,
+            Err(e) => {
+                warn!("forward-deliver: sign failed: {e}; re-storing");
+                let remaining = msg.expires_at.saturating_sub(now);
+                services
+                    .mailbox
+                    .store(session.peer_side, msg.envelope, remaining)
+                    .await;
+                continue;
+            }
+        };
+        match session.open_and_send(&env).await {
+            Ok((mut send, _recv)) => {
+                send.finish().ok();
+            }
+            Err(e) => {
+                debug!("forward-deliver: transient send failure: {e}; re-storing for retry");
+                let remaining = msg.expires_at.saturating_sub(now);
+                services
+                    .mailbox
+                    .store(session.peer_side, msg.envelope, remaining)
+                    .await;
+                services.metrics.incr_forward_retry();
+            }
         }
     }
 
@@ -1497,7 +1982,13 @@ async fn serve_gossip(session: Session, services: Services) -> Result<()> {
             | Err(Error::Connection(quinn::ConnectionError::TimedOut)) => return Ok(()),
             Err(e) => return Err(e),
         };
-        if !check_freshness_and_replay(&env, &services.replay).await {
+        if !check_reputation_gate(&env, &services).await {
+            debug!("envelope dropped: peer rate-limited or refused");
+            continue;
+        }
+        if !check_freshness_and_replay_metered(&env, &services.replay, Some(&services.metrics))
+            .await
+        {
             warn!("gossip envelope rejected: stale or replayed");
             continue;
         }
@@ -1570,6 +2061,7 @@ async fn serve_gossip(session: Session, services: Services) -> Result<()> {
                 if services.gossip.observe(&env).await {
                     fanout_broadcast(&services, &env, &session.peer_side).await;
                     let _ = services.gossip_tx.send(env).await;
+                    services.metrics.incr_broadcast_received();
                 }
             }
             other => {
@@ -1582,32 +2074,73 @@ async fn serve_gossip(session: Session, services: Services) -> Result<()> {
 /// Serve a Verse-intent connection: dispatch ContractFetch, JoinRequest,
 /// and VersePost against the node's hosted verse (if any). Phase 1.5a only
 /// handles a single hosted verse per node.
+#[tracing::instrument(
+    name = "serve.verse",
+    skip(session, services),
+    fields(peer = %hex::encode(session.peer_side)),
+    err
+)]
 async fn serve_verse(session: Session, services: Services) -> Result<()> {
-    // Snapshot the hosted verse once at session start. No verse → close.
-    let host = {
-        let g = services.hosted_verse.lock().await;
-        match g.as_ref() {
-            Some(h) => h.clone(),
-            None => {
-                debug!("verse intent received but no verse hosted; closing");
-                return Ok(());
-            }
+    // Phase 1.5.E: snapshot every hosted verse + build a
+    // contract-hash → verse-addr index for messages that only carry
+    // contract_hash. No verses → close immediately.
+    let (hosts, contract_hash_index) = {
+        let g = services.hosted_verses.lock().await;
+        if g.is_empty() {
+            debug!("verse intent received but no verses hosted; closing");
+            return Ok(());
+        }
+        let mut hosts = std::collections::HashMap::new();
+        let mut idx = std::collections::HashMap::new();
+        for (addr, h) in g.iter() {
+            hosts.insert(*addr, h.clone());
+        }
+        drop(g);
+        for (addr, h) in hosts.iter() {
+            let hash = h.contract().await.hash();
+            idx.insert(hash, *addr);
+        }
+        (hosts, idx)
+    };
+
+    // For backward compatibility: pick a "default" verse (used when a
+    // payload carries no routing field). With exactly one host this is
+    // unambiguous; with several we pick deterministically by the
+    // lowest address.
+    let mut default_addr_opt: Option<[u8; 32]> = None;
+    for addr in hosts.keys() {
+        if default_addr_opt.is_none_or(|cur| addr < &cur) {
+            default_addr_opt = Some(*addr);
+        }
+    }
+    // `hosts` was just checked non-empty above; default_addr_opt is Some
+    // and the address is a key in `hosts`. If a future refactor breaks
+    // either invariant we'd rather drop the session than panic.
+    let host = match default_addr_opt.and_then(|addr| hosts.get(&addr).cloned()) {
+        Some(h) => h,
+        None => {
+            debug!("serve_verse: hosts table inconsistent; closing");
+            return Ok(());
         }
     };
 
     // Register this peer's Verse-intent connection for post fanout + key
-    // rotation push. RAII guard removes it on exit.
+    // rotation push, on every hosted verse so any of them can fan out
+    // to this peer if they admit them. RAII guards remove on exit.
     let peer_side = session.peer_side;
-    host.with_mut(|inner| {
-        inner
-            .active_sessions
-            .insert(peer_side, session.connection.clone());
-    })
-    .await;
-    let _guard = VerseSessionGuard {
-        host: host.clone(),
-        peer_side,
-    };
+    for h in hosts.values() {
+        h.with_mut(|inner| {
+            inner
+                .active_sessions
+                .insert(peer_side, session.connection.clone());
+        })
+        .await;
+    }
+    let _guards: Vec<VerseSessionGuard> = hosts
+        .values()
+        .cloned()
+        .map(|h| VerseSessionGuard { host: h, peer_side })
+        .collect();
 
     loop {
         let (mut send, _recv, env) = match session.accept_one().await {
@@ -1618,7 +2151,13 @@ async fn serve_verse(session: Session, services: Services) -> Result<()> {
             | Err(Error::Connection(quinn::ConnectionError::TimedOut)) => return Ok(()),
             Err(e) => return Err(e),
         };
-        if !check_freshness_and_replay(&env, &services.replay).await {
+        if !check_reputation_gate(&env, &services).await {
+            debug!("envelope dropped: peer rate-limited or refused");
+            continue;
+        }
+        if !check_freshness_and_replay_metered(&env, &services.replay, Some(&services.metrics))
+            .await
+        {
             warn!("verse envelope rejected: stale or replayed");
             continue;
         }
@@ -1644,6 +2183,17 @@ async fn serve_verse(session: Session, services: Services) -> Result<()> {
                         continue;
                     }
                 };
+                // Phase 1.5.E: route by contract_hash to the host whose
+                // current contract matches. Pre-1.5.E this used the
+                // default-host's contract and would silently decline
+                // legitimate joins to a different hosted verse.
+                let host = match contract_hash_index
+                    .get(&req.contract_hash)
+                    .and_then(|addr| hosts.get(addr))
+                {
+                    Some(h) => h.clone(),
+                    None => host.clone(),
+                };
                 // Verify the contract hash matches our current contract.
                 let contract = host.contract().await;
                 let expected_hash = contract.hash();
@@ -1651,6 +2201,52 @@ async fn serve_verse(session: Session, services: Services) -> Result<()> {
                     let decline = JoinDeclinePayload {
                         contract_hash: expected_hash,
                         reason: "contract-version-mismatch".into(),
+                    };
+                    let resp = sign_response(
+                        &services.side,
+                        &env.from,
+                        MessageType::JOIN_DECLINE,
+                        decline.encode(),
+                    )?;
+                    send_envelope(&mut send, &resp).await?;
+                    send.finish().ok();
+                    continue;
+                }
+                // §8.4 field-kind enforcement — "the verse refuses to
+                // accept fields whose declared kind is forbidden ...
+                // enforced mechanically at the protocol layer."
+                // - Required: every kind in contract.required MUST appear
+                //   in req.fields. Otherwise reason = "missing-required".
+                // - Forbidden: no kind in req.fields may match an entry
+                //   in contract.forbidden. Otherwise reason = "forbidden-field".
+                if let Some(missing) = contract
+                    .required
+                    .iter()
+                    .find(|spec| !req.fields.contains_key(&spec.kind))
+                {
+                    debug!(
+                        "JoinRequest declined: missing required kind {:?}",
+                        missing.kind
+                    );
+                    let decline = JoinDeclinePayload {
+                        contract_hash: expected_hash,
+                        reason: "missing-required".into(),
+                    };
+                    let resp = sign_response(
+                        &services.side,
+                        &env.from,
+                        MessageType::JOIN_DECLINE,
+                        decline.encode(),
+                    )?;
+                    send_envelope(&mut send, &resp).await?;
+                    send.finish().ok();
+                    continue;
+                }
+                if let Some(bad_kind) = req.fields.keys().find(|k| contract.is_forbidden(k)) {
+                    debug!("JoinRequest declined: forbidden kind {:?}", bad_kind);
+                    let decline = JoinDeclinePayload {
+                        contract_hash: expected_hash,
+                        reason: "forbidden-field".into(),
                     };
                     let resp = sign_response(
                         &services.side,
@@ -1718,6 +2314,30 @@ async fn serve_verse(session: Session, services: Services) -> Result<()> {
                 send.finish().ok();
             }
             MessageType::VERSE_POST => {
+                let post = match VersePostPayload::decode(&env.payload) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn!("VersePost decode failed: {e}");
+                        continue;
+                    }
+                };
+                // Phase 1.5.E: route by env.to (which `post_to_verse`
+                // sets to the verse address). Fall back to the default
+                // host if to is missing or not hosted. Log the
+                // fallback so operators can spot mis-routed posts.
+                let host = match env.to.as_ref().and_then(|addr| hosts.get(addr)) {
+                    Some(h) => h.clone(),
+                    None => {
+                        if hosts.len() > 1 {
+                            debug!(
+                                env_to = ?env.to.as_ref().map(hex::encode),
+                                default = %hex::encode(default_addr_opt.unwrap_or([0u8; 32])),
+                                "VERSE_POST: env.to absent or not hosted; falling through to default verse host (multi-verse routing — likely a sender bug)"
+                            );
+                        }
+                        host.clone()
+                    }
+                };
                 // Only accept posts from current members who have consented
                 // to the current contract version.
                 let current_version = host.with(|inner| inner.contract.version).await;
@@ -1734,13 +2354,6 @@ async fn serve_verse(session: Session, services: Services) -> Result<()> {
                     debug!("verse post rejected: non-member or stale consent");
                     continue;
                 }
-                let post = match VersePostPayload::decode(&env.payload) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        warn!("VersePost decode failed: {e}");
-                        continue;
-                    }
-                };
                 let plain = match host
                     .with(|inner| {
                         inner.content_key.open(
@@ -1769,6 +2382,14 @@ async fn serve_verse(session: Session, services: Services) -> Result<()> {
                     verse_fanout_post(&host_for_fanout, &fan_env, &author).await;
                 });
 
+                // Phase 1.5.D: retain the sealed post so disposition=Retract
+                // on a future VerseLeave has something to act on.
+                let verse_addr = host.with(|inner| inner.verse_key.public_bytes()).await;
+                let now = sidevers_core::envelope::now_unix_seconds().unwrap_or(0);
+                host.posts()
+                    .insert(verse_addr, env.from, env.clone(), env.payload.clone(), now)
+                    .await;
+
                 let _ = services
                     .verse_post_tx
                     .send(VersePostReceived {
@@ -1776,6 +2397,7 @@ async fn serve_verse(session: Session, services: Services) -> Result<()> {
                         plaintext: plain,
                     })
                     .await;
+                services.metrics.incr_verse_post_received();
             }
             MessageType::VERSE_LEAVE => {
                 // Decode + verify membership_hash matches a known member.
@@ -1791,6 +2413,17 @@ async fn serve_verse(session: Session, services: Services) -> Result<()> {
                     warn!("VerseLeave: side != envelope.from");
                     continue;
                 }
+                // Phase 1.5.E route to the named verse, not the default.
+                let host = match hosts.get(&leave.verse) {
+                    Some(h) => h.clone(),
+                    None => {
+                        debug!(
+                            "VerseLeave for verse {} not hosted on this node; ignoring",
+                            hex::encode(leave.verse)
+                        );
+                        continue;
+                    }
+                };
                 let was_member = host
                     .with_mut(|inner| {
                         let was = inner.members.remove(&leave.side);
@@ -1802,6 +2435,19 @@ async fn serve_verse(session: Session, services: Services) -> Result<()> {
                 if !was_member {
                     debug!("VerseLeave from non-member ignored");
                     continue;
+                }
+                // Phase 1.5.D execute disposition.
+                if leave.disposition == DataDisposition::Retract {
+                    let verse_addr = host.with(|inner| inner.verse_key.public_bytes()).await;
+                    let n = host
+                        .posts()
+                        .retract_by_author(&verse_addr, &leave.side)
+                        .await;
+                    debug!(
+                        author = %hex::encode(leave.side),
+                        retracted = n,
+                        "verse leave disposition=Retract: dropped author's posts"
+                    );
                 }
                 // Rotate the content key and push the new sealed key to
                 // every remaining active member session.
@@ -1817,14 +2463,38 @@ async fn serve_verse(session: Session, services: Services) -> Result<()> {
                         continue;
                     }
                 };
-                // Phase 1.5b moderator authority: only the verse's own keypair.
-                let verse_pk = host.with(|inner| inner.verse_key.public_bytes()).await;
-                if remove.issued_by != verse_pk {
-                    debug!("VerseRemove issued_by != verse keypair; rejected");
+                // Phase 1.5.E route to the named verse.
+                let host = match hosts.get(&remove.verse) {
+                    Some(h) => h.clone(),
+                    None => {
+                        debug!(
+                            "VerseRemove for verse {} not hosted on this node; ignoring",
+                            hex::encode(remove.verse)
+                        );
+                        continue;
+                    }
+                };
+                // Phase 1.5.B: moderator authority — the verse keypair
+                // OR any side listed in `contract.moderators` qualifies.
+                // The envelope sender and the `issued_by` field must be
+                // the same moderator (no cross-signing).
+                let (verse_pk, is_mod) = host
+                    .with(|inner| {
+                        let v = inner.verse_key.public_bytes();
+                        let m = inner.contract.is_moderator(&remove.issued_by);
+                        (v, m)
+                    })
+                    .await;
+                if !is_mod {
+                    debug!(
+                        "VerseRemove issued_by ({}) is neither the verse keypair nor a listed moderator; rejected",
+                        hex::encode(remove.issued_by)
+                    );
+                    let _ = verse_pk;
                     continue;
                 }
-                if env.from != verse_pk {
-                    debug!("VerseRemove envelope from != verse keypair; rejected");
+                if env.from != remove.issued_by {
+                    debug!("VerseRemove envelope.from != issued_by; rejected");
                     continue;
                 }
                 let was_member = host
@@ -2007,9 +2677,11 @@ fn scopeguard_gossip(
     GossipGuard { active, key }
 }
 
-/// Fan a novel public broadcast to all other active gossip connections.
+/// Fan a novel public broadcast to other active gossip connections,
+/// gated by the configured `GossipPolicy` (Phase 1.A3, spec §6.9.3).
 async fn fanout_broadcast(services: &Services, env: &Envelope, source_peer: &[u8; 32]) {
-    let connections: Vec<([u8; 32], quinn::Connection)> = {
+    let policy = *services.gossip_policy.lock().await;
+    let mut connections: Vec<([u8; 32], quinn::Connection)> = {
         let active = services.active_gossip.lock().await;
         active
             .iter()
@@ -2017,6 +2689,38 @@ async fn fanout_broadcast(services: &Services, env: &Envelope, source_peer: &[u8
             .map(|(k, c)| (*k, c.clone()))
             .collect()
     };
+    // Apply the policy filter.
+    match policy.propagation {
+        GossipPropagation::Open => {}
+        GossipPropagation::ExcludeRefused => {
+            let mut kept = Vec::with_capacity(connections.len());
+            for (peer_key, conn) in connections.drain(..) {
+                if services.reputation.is_refused(&peer_key).await {
+                    debug!(
+                        peer = %hex::encode(peer_key),
+                        "gossip-policy: skipping refused peer in fanout"
+                    );
+                    continue;
+                }
+                kept.push((peer_key, conn));
+            }
+            connections = kept;
+        }
+        GossipPropagation::RelationshipsOnly => {
+            let mut kept = Vec::with_capacity(connections.len());
+            for (peer_key, conn) in connections.drain(..) {
+                if !services.side_state.relationship_contains(&peer_key).await {
+                    debug!(
+                        peer = %hex::encode(peer_key),
+                        "gossip-policy: skipping non-relationship peer in fanout"
+                    );
+                    continue;
+                }
+                kept.push((peer_key, conn));
+            }
+            connections = kept;
+        }
+    }
     for (peer_key, conn) in connections {
         let env = env.clone();
         tokio::spawn(async move {
@@ -2090,21 +2794,63 @@ fn sign_response(
     Ok(env)
 }
 
-async fn check_freshness_and_replay(env: &Envelope, replay: &Arc<Mutex<ReplayCache>>) -> bool {
+async fn check_freshness_and_replay_metered(
+    env: &Envelope,
+    replay: &Arc<Mutex<ReplayCache>>,
+    metrics: Option<&Metrics>,
+) -> bool {
     let now = match sidevers_core::envelope::now_unix_seconds() {
         Ok(n) => n,
         Err(_) => return false,
     };
-    if env
-        .check_freshness(now, sidevers_core::envelope::DEFAULT_MAX_SKEW_SECS)
-        .is_err()
-    {
+    // Phase 1.H1 graceful fallback: tiered skew handling.
+    //   |skew| ≤ DEFAULT (300s)        → accept silently
+    //   |skew| in (DEFAULT, SOFT]      → accept with warning so operators
+    //                                    notice clock drift (mine or peer's)
+    //                                    instead of silently dropping all
+    //                                    traffic.
+    //   |skew| > SOFT (900s)           → reject (catastrophic skew).
+    let skew = env.timestamp.abs_diff(now);
+    if skew > sidevers_core::envelope::SOFT_MAX_SKEW_SECS {
+        if let Some(m) = metrics {
+            m.incr_dropped_skew_hard();
+            m.incr_dropped_freshness();
+        }
         return false;
+    }
+    if skew > sidevers_core::envelope::DEFAULT_MAX_SKEW_SECS {
+        if let Some(m) = metrics {
+            m.incr_warned_skew_soft();
+        }
+        warn!(
+            from = %hex::encode(env.from),
+            skew_secs = skew,
+            "clock-skew warning: envelope outside default window but within soft limit — check local clock"
+        );
     }
     let mut nonce_arr = [0u8; NONCE_LEN];
     nonce_arr.copy_from_slice(&env.nonce);
     let mut cache = replay.lock().await;
-    !cache.observe(now, &env.from, &nonce_arr)
+    let is_replay = cache.observe(now, &env.from, &nonce_arr);
+    if is_replay && let Some(m) = metrics {
+        m.incr_dropped_replay();
+    }
+    !is_replay
+}
+
+/// Per spec §6.9: consult the per-peer reputation table BEFORE doing any
+/// expensive per-envelope work. Returns `false` if `env.from` is currently
+/// refused (sig-failures or malformed-payload threshold crossed) OR if the
+/// peer has exhausted its per-second token bucket. Increments the seen
+/// counter regardless. Also bumps the H3 envelope counters.
+async fn check_reputation_gate(env: &Envelope, services: &Services) -> bool {
+    services.metrics.incr_envelope();
+    let now = sidevers_core::envelope::now_unix_seconds().unwrap_or(0);
+    let ok = services.reputation.observe_envelope(&env.from, now).await;
+    if !ok {
+        services.metrics.incr_dropped_reputation();
+    }
+    ok
 }
 
 /// Stamp the hosted side's `last_send_at = now` and, if the lifecycle is
@@ -2351,6 +3097,8 @@ pub async fn request_join(
             let decline = JoinDeclinePayload::decode(&resp.payload).map_err(Error::Core)?;
             Err(Error::Invariant(match decline.reason.as_str() {
                 "contract-version-mismatch" => "join declined: contract-version-mismatch",
+                "missing-required" => "join declined: missing-required",
+                "forbidden-field" => "join declined: forbidden-field",
                 "moderator-rejected" => "join declined: moderator-rejected",
                 _ => "join declined",
             }))
@@ -2490,6 +3238,12 @@ pub async fn post_to_verse(
 /// awaits the peer's stream-close acknowledgment before returning — without
 /// this, the caller can drop the session before the bytes leave the local
 /// QUIC stack.
+///
+/// # Errors
+/// - `Error::Core` for envelope-sign / payload-seal failures (CSPRNG /
+///   AEAD / clock).
+/// - Underlying `quinn` stream errors via `From` (`Error::Write`,
+///   `Error::Connection`).
 pub async fn send_dm(session: &Session, side: &SideKey, plaintext: &[u8]) -> Result<()> {
     let nonce = random_nonce()?;
     let ciphertext = core_payload::seal(plaintext, side, &session.peer_side, &nonce, b"")?;
@@ -2505,6 +3259,33 @@ pub async fn send_dm(session: &Session, side: &SideKey, plaintext: &[u8]) -> Res
     send.finish().ok();
     // Wait for the peer to either STOP_SENDING (abnormal) or fully read +
     // close (normal). Either way, the bytes have left our side by then.
+    let _ = send.stopped().await;
+    Ok(())
+}
+
+/// Publish a signed `LinkageProof` to the peer over an existing
+/// Direct-intent session (spec §2.7). `side` must be one of the two
+/// linked sides — the responder rejects proofs whose envelope sender is
+/// neither `proof.side_a` nor `proof.side_b`.
+///
+/// # Errors
+/// - `Error::Core` for envelope-sign failures.
+/// - Underlying `quinn` stream errors via `From`.
+pub async fn publish_linkage_proof(
+    session: &Session,
+    side: &SideKey,
+    proof: &LinkageProof,
+) -> Result<()> {
+    let env = Envelope::sign_with(
+        MessageType::LINKAGE_PUBLISH,
+        side,
+        Some(session.peer_side),
+        proof.to_wire_bytes(),
+        now_unix_seconds()?,
+        random_nonce()?,
+    )?;
+    let (mut send, _recv) = session.open_and_send(&env).await?;
+    send.finish().ok();
     let _ = send.stopped().await;
     Ok(())
 }
@@ -2578,6 +3359,13 @@ pub async fn offer_object(
 /// `PROFILE_DELIVER` on the same bidi stream, and verifies the embedded
 /// signature. The returned profile is content-addressed: callers can
 /// cache by `profile.hash()`.
+///
+/// # Errors
+/// - `Error::Invariant` if the peer responds with anything other than
+///   `PROFILE_DELIVER`, or if the profile's `side` field doesn't match
+///   `target` or the envelope's `from`.
+/// - `Error::Core` if the profile signature fails to verify.
+/// - Underlying `quinn` stream errors via `From`.
 pub async fn fetch_profile(
     session: &Session,
     side: &SideKey,
@@ -2645,6 +3433,12 @@ pub async fn retract_object(session: &Session, side: &SideKey, hash: [u8; 32]) -
 }
 
 /// Fetch an object by hash from this storage session.
+///
+/// # Errors
+/// - `Error::Invariant` if the peer's response is not `STORAGE_HAVE` or
+///   `STORAGE_MISS`, or if a `STORAGE_HAVE` response's bytes hash to a
+///   value that doesn't match the requested hash (§5.4 mandate).
+/// - Underlying `quinn` stream / `Core` errors via `From`.
 pub async fn fetch_object(
     session: &Session,
     side: &SideKey,

@@ -14,6 +14,7 @@
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::params;
@@ -28,6 +29,12 @@ pub const INLINE_MAX: usize = 4096;
 /// BLAKE3 address length, in bytes.
 pub const ADDRESS_LEN: usize = 32;
 
+/// Phase 1.C2 default disk budget for the object store. Eviction stays
+/// idle until the total stored bytes exceed this. `0` (the default if
+/// never explicitly set) disables eviction entirely — backward-compatible
+/// with pre-1.C2 behavior.
+pub const DEFAULT_MAX_BYTES: u64 = 0;
+
 #[derive(Clone)]
 pub struct ObjectStore {
     inner: Arc<Inner>,
@@ -36,6 +43,9 @@ pub struct ObjectStore {
 struct Inner {
     conn: Mutex<rusqlite::Connection>,
     blob_dir: PathBuf,
+    /// Phase 1.C2: soft disk-budget cap (bytes). `0` = no eviction.
+    /// Atomic so callers can reconfigure live without taking the conn lock.
+    max_bytes: AtomicU64,
 }
 
 impl ObjectStore {
@@ -49,14 +59,111 @@ impl ObjectStore {
             std::fs::create_dir_all(&blob_dir)?;
             let db_path = data_dir.join("objects.db");
             let conn = db::open_and_migrate(&db_path)?;
+            // Phase 1.H1 (audit-pass): lock down the SQLite metadata
+            // file, the blob subtree, and the parent dir to owner-only
+            // so other local users on shared machines can't read the
+            // content-addressed cache.
+            let _ = lock_down_dir_owner_only(&data_dir);
+            let _ = lock_down_dir_owner_only(&blob_dir);
+            let _ = lock_down_file_owner_only(&db_path);
             Ok(Self {
                 inner: Arc::new(Inner {
                     conn: Mutex::new(conn),
                     blob_dir,
+                    max_bytes: AtomicU64::new(DEFAULT_MAX_BYTES),
                 }),
             })
         })
         .await?
+    }
+
+    /// Phase 1.C2: set the soft disk budget (bytes). When the on-disk +
+    /// inline total exceeds this, [`Self::evict_to_budget`] removes the
+    /// least-recently-accessed unpinned objects until the total fits.
+    /// `0` disables eviction (backward-compatible default).
+    pub fn set_max_bytes(&self, max_bytes: u64) {
+        self.inner.max_bytes.store(max_bytes, Ordering::Relaxed);
+    }
+
+    pub fn max_bytes(&self) -> u64 {
+        self.inner.max_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Total bytes recorded across all objects (sum of `size` column).
+    pub async fn total_bytes(&self) -> Result<u64> {
+        let conn = self.inner.conn.lock().await;
+        let total: i64 = conn
+            .query_row("SELECT COALESCE(SUM(size), 0) FROM objects", [], |r| {
+                r.get(0)
+            })
+            .unwrap_or(0);
+        Ok(total as u64)
+    }
+
+    /// Phase 1.C2: LRU eviction of unpinned objects until total bytes
+    /// fits the configured budget. Returns the count + bytes evicted.
+    /// No-ops if `max_bytes == 0`. Pinned objects are never evicted.
+    pub async fn evict_to_budget(&self) -> Result<(usize, u64)> {
+        let budget = self.inner.max_bytes.load(Ordering::Relaxed);
+        if budget == 0 {
+            return Ok((0, 0));
+        }
+        let total = self.total_bytes().await?;
+        if total <= budget {
+            return Ok((0, 0));
+        }
+        // Collect candidates (unpinned), oldest-first.
+        let candidates: Vec<([u8; ADDRESS_LEN], u64)> = {
+            let conn = self.inner.conn.lock().await;
+            let mut stmt = conn.prepare(
+                "SELECT hash, size FROM objects WHERE pinned = 0 \
+                 ORDER BY last_accessed ASC, added_at ASC",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                let h: Vec<u8> = r.get(0)?;
+                let sz: i64 = r.get(1)?;
+                Ok((h, sz as u64))
+            })?;
+            let mut out = Vec::new();
+            for r in rows {
+                let (h_bytes, sz) = r?;
+                if h_bytes.len() != ADDRESS_LEN {
+                    continue;
+                }
+                let mut arr = [0u8; ADDRESS_LEN];
+                arr.copy_from_slice(&h_bytes);
+                out.push((arr, sz));
+            }
+            out
+        };
+
+        let mut bytes_to_drop = total.saturating_sub(budget);
+        let mut count = 0usize;
+        let mut bytes = 0u64;
+        for (hash, size) in candidates {
+            if bytes_to_drop == 0 {
+                break;
+            }
+            self.evict_one(&hash).await?;
+            count += 1;
+            bytes += size;
+            bytes_to_drop = bytes_to_drop.saturating_sub(size);
+        }
+        Ok((count, bytes))
+    }
+
+    /// Drop a single object's bytes (file + row). Idempotent. Used by
+    /// `evict_to_budget`; also useful for `STORAGE_RETRACT` once the
+    /// last publisher releases provenance.
+    pub async fn evict_one(&self, hash: &[u8; ADDRESS_LEN]) -> Result<()> {
+        // Best-effort: delete file (ignore not-found), then drop the row.
+        let path = blob_path(&self.inner.blob_dir, hash);
+        if path.exists() {
+            tokio::fs::remove_file(&path).await.ok();
+        }
+        let conn = self.inner.conn.lock().await;
+        conn.execute("DELETE FROM objects WHERE hash = ?", params![&hash[..]])?;
+        Ok(())
     }
 
     /// Store `bytes`. Returns the BLAKE3 address.
@@ -190,6 +297,35 @@ fn blob_path(blob_dir: &Path, hash: &[u8; ADDRESS_LEN]) -> PathBuf {
     blob_dir.join(&hex[..2]).join(hex)
 }
 
+/// Phase 1.H1 (audit-pass): chmod 0o600 the file (owner read+write).
+/// No-op on non-Unix.
+fn lock_down_file_owner_only(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = std::fs::metadata(path)?;
+        let mut perms = meta.permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(path, perms)?;
+    }
+    let _ = path;
+    Ok(())
+}
+
+/// Phase 1.H1 (audit-pass): chmod 0o700 the directory (owner-only).
+fn lock_down_dir_owner_only(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = std::fs::metadata(path)?;
+        let mut perms = meta.permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(path, perms)?;
+    }
+    let _ = path;
+    Ok(())
+}
+
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -287,6 +423,67 @@ mod tests {
         let hash = store.put(bytes.clone()).await.unwrap();
         let mid = store.get_range(&hash, 10..20).await.unwrap().unwrap();
         assert_eq!(mid, bytes[10..20]);
+    }
+
+    #[tokio::test]
+    async fn evict_to_budget_no_op_when_under_budget() {
+        let tmp = TempDir::new().unwrap();
+        let store = ObjectStore::open(tmp.path()).await.unwrap();
+        store.set_max_bytes(1024 * 1024);
+        store.put(b"small".to_vec()).await.unwrap();
+        let (count, bytes) = store.evict_to_budget().await.unwrap();
+        assert_eq!(count, 0);
+        assert_eq!(bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn evict_to_budget_drops_oldest_unpinned_until_under_budget() {
+        let tmp = TempDir::new().unwrap();
+        let store = ObjectStore::open(tmp.path()).await.unwrap();
+        // Use small budget that fits 1.5 inline objects.
+        // Three 100-byte objects, budget 150 bytes → must drop two.
+        let h1 = store.put(vec![0xAA; 100]).await.unwrap();
+        // Force monotonic last_accessed by touching h1 explicitly later;
+        // for now insert h2, h3 in order so their added_at orders too.
+        let h2 = store.put(vec![0xBB; 100]).await.unwrap();
+        let h3 = store.put(vec![0xCC; 100]).await.unwrap();
+        store.set_max_bytes(150);
+        let (count, bytes) = store.evict_to_budget().await.unwrap();
+        assert!(
+            count >= 2 && bytes >= 200,
+            "expected to drop at least 2 objects (>=200 bytes), got count={count} bytes={bytes}"
+        );
+        // h3 (newest) should still be there.
+        assert!(store.has(&h3).await.unwrap());
+        // At least one of h1/h2 (oldest) must have been removed.
+        assert!(!store.has(&h1).await.unwrap() || !store.has(&h2).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn evict_to_budget_skips_pinned() {
+        let tmp = TempDir::new().unwrap();
+        let store = ObjectStore::open(tmp.path()).await.unwrap();
+        let h1 = store.put(vec![0xAA; 100]).await.unwrap();
+        let h2 = store.put(vec![0xBB; 100]).await.unwrap();
+        store.pin(&h1).await.unwrap();
+        store.set_max_bytes(50); // way under
+        let _ = store.evict_to_budget().await.unwrap();
+        // Pinned must survive.
+        assert!(store.has(&h1).await.unwrap());
+        // Unpinned must be gone.
+        assert!(!store.has(&h2).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn evict_to_budget_zero_budget_disables() {
+        let tmp = TempDir::new().unwrap();
+        let store = ObjectStore::open(tmp.path()).await.unwrap();
+        let h = store.put(vec![0xAA; 100]).await.unwrap();
+        // Default: max_bytes = 0 → eviction disabled even when "over."
+        let (count, bytes) = store.evict_to_budget().await.unwrap();
+        assert_eq!(count, 0);
+        assert_eq!(bytes, 0);
+        assert!(store.has(&h).await.unwrap());
     }
 
     #[tokio::test]

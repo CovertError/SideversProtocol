@@ -4,12 +4,12 @@
 # workspace (cargo-fuzz manages this as a standalone sub-crate). To run:
 #
 #   cd fuzz
-#   cargo +nightly fuzz run envelope_decode
-#   cargo +nightly fuzz run cbor_decode
-#   cargo +nightly fuzz run direct_message_decode
+#   cargo +nightly fuzz run <target_name>
 #
-# Each target hammers a decoder with arbitrary bytes and asserts the only
-# acceptable outcomes are `Ok` or `Err` — never a panic, never UB.
+# Phase 1.F3 expansion: every signed-on-wire type that has a public
+# `from_wire_bytes` or `decode` entry point gets its own harness.
+# Each target hammers a decoder with arbitrary bytes and asserts the
+# only acceptable outcomes are `Ok` or `Err` — never a panic, never UB.
 
 [package]
 name = "sidevers-fuzz"
@@ -41,6 +41,180 @@ bench = false
 [[bin]]
 name = "direct_message_decode"
 path = "fuzz_targets/direct_message_decode.rs"
+test = false
+doc = false
+bench = false
+
+# ---- Phase 1.F3: identity / device decoders ----
+
+[[bin]]
+name = "linkage_decode"
+path = "fuzz_targets/linkage_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "profile_decode"
+path = "fuzz_targets/profile_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "retirement_decode"
+path = "fuzz_targets/retirement_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pairing_request_decode"
+path = "fuzz_targets/pairing_request_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "state_bundle_decode"
+path = "fuzz_targets/state_bundle_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "state_delta_decode"
+path = "fuzz_targets/state_delta_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "device_revoke_decode"
+path = "fuzz_targets/device_revoke_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pairing_qr_parse"
+path = "fuzz_targets/pairing_qr_parse.rs"
+test = false
+doc = false
+bench = false
+
+# ---- Phase 1.F3: verse decoders ----
+
+[[bin]]
+name = "contract_object_decode"
+path = "fuzz_targets/contract_object_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "contract_fetch_decode"
+path = "fuzz_targets/contract_fetch_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "contract_deliver_decode"
+path = "fuzz_targets/contract_deliver_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "join_request_decode"
+path = "fuzz_targets/join_request_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "join_accept_decode"
+path = "fuzz_targets/join_accept_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "join_decline_decode"
+path = "fuzz_targets/join_decline_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "verse_leave_decode"
+path = "fuzz_targets/verse_leave_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "verse_remove_decode"
+path = "fuzz_targets/verse_remove_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "verse_post_decode"
+path = "fuzz_targets/verse_post_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "verse_amend_decode"
+path = "fuzz_targets/verse_amend_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "verse_reconsent_decode"
+path = "fuzz_targets/verse_reconsent_decode.rs"
+test = false
+doc = false
+bench = false
+
+# ---- Phase 1.F3: misc decoders ----
+
+[[bin]]
+name = "storage_prefs_decode"
+path = "fuzz_targets/storage_prefs_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "peer_ask_decode"
+path = "fuzz_targets/peer_ask_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "peer_tell_decode"
+path = "fuzz_targets/peer_tell_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rendezvous_decode"
+path = "fuzz_targets/rendezvous_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rendezvous_ack_decode"
+path = "fuzz_targets/rendezvous_ack_decode.rs"
 test = false
 doc = false
 bench = false

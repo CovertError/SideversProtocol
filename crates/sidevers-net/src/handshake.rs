@@ -9,6 +9,7 @@
 //! After Confirm verifies, both parties hold the same `session_key` derived
 //! from the ephemeral X25519 exchange and the BLAKE3-hashed transcript.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use hkdf::Hkdf;
@@ -19,12 +20,37 @@ use sidevers_core::keys::{PUBLIC_KEY_LEN, SideKey};
 use sidevers_core::messages::handshake::{
     ConfirmPayload, EPH_PUB_LEN, HelloBackPayload, HelloPayload,
 };
-use sidevers_core::{Address, AddressKind, MessageType};
+use sidevers_core::{Address, AddressKind, MessageType, PROTOCOL_VERSION};
+use tracing::debug;
 use x25519_dalek::{EphemeralSecret, PublicKey as XPublicKey};
 
 use crate::error::{Error, Result};
 use crate::framing::{recv_envelope, send_envelope};
 use crate::session::{Intent, Session};
+
+/// Capability key advertising the protocol major version we speak.
+pub const CAP_PROTOCOL: &str = "protocol";
+/// Capability key with a bitmask of intents this node accepts (bit `i`
+/// set ⇔ intent `i` is supported, with `i` = `Intent::as_u8()`).
+pub const CAP_INTENTS_MASK: &str = "intents_mask";
+/// Capability key advertising the maximum envelope size in KiB we'll
+/// accept. Future extension point; informational in Phase 1.
+pub const CAP_MAX_ENVELOPE_KIB: &str = "max_envelope_kib";
+
+/// Build the capabilities map this node advertises in Hello /
+/// HelloBack. Phase 1.D — populated; was a dead field prior.
+pub(crate) fn local_capabilities() -> BTreeMap<String, u64> {
+    let mut caps = BTreeMap::new();
+    caps.insert(CAP_PROTOCOL.to_owned(), PROTOCOL_VERSION);
+    // All 5 v1 intents are supported by the node responder.
+    let mut mask: u64 = 0;
+    for i in 1u8..=5 {
+        mask |= 1u64 << i;
+    }
+    caps.insert(CAP_INTENTS_MASK.to_owned(), mask);
+    caps.insert(CAP_MAX_ENVELOPE_KIB.to_owned(), 1024);
+    caps
+}
 
 /// Hard ceiling on total handshake duration per spec §4.6.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -36,6 +62,20 @@ pub const SESSION_KEY_LEN: usize = 32;
 const SESSION_HKDF_INFO: &[u8] = b"sidevers/v1/session";
 
 /// Run the initiator side of the handshake on a freshly-opened bi-stream.
+///
+/// # Errors
+/// - `Error::HandshakeTimeout` if the full handshake doesn't complete
+///   within `HANDSHAKE_TIMEOUT` (10s).
+/// - `Error::HandshakeDeclined` if the responder rejects via `HelloBack
+///   {accept: false}`.
+/// - `Error::HandshakeProtocol` on malformed exchange.
+/// - Underlying `quinn` / `Core` / `Rcgen` / `Rustls` errors via `From`.
+#[tracing::instrument(
+    name = "handshake.initiator",
+    skip(conn, my_side, expected_peer_side),
+    fields(intent = %intent.as_u8(), my_side = %hex::encode(my_side.public_bytes())),
+    err
+)]
 pub async fn run_initiator(
     conn: &quinn::Connection,
     my_side: &SideKey,
@@ -70,7 +110,7 @@ async fn run_initiator_inner(
         extensions: vec![],
         eph_pub: eph_pub_bytes,
         intent: intent.as_u8(),
-        capabilities: Default::default(),
+        capabilities: local_capabilities(),
     };
     let hello_env = Envelope::sign_with(
         MessageType::HELLO,
@@ -122,15 +162,36 @@ async fn run_initiator_inner(
     // We deliberately don't read from `recv` after this; the responder closes
     // its send half on success.
 
-    Ok(Session::new(
+    if !helloback_payload.capabilities.is_empty() {
+        debug!(
+            peer = %hex::encode(helloback_env.from),
+            caps = ?helloback_payload.capabilities,
+            "handshake: peer advertised capabilities"
+        );
+    }
+
+    Ok(Session::with_capabilities(
         conn.clone(),
         session_key,
         helloback_env.from,
         intent,
+        helloback_payload.capabilities,
     ))
 }
 
 /// Run the responder side of the handshake. Reads from one accepted bi-stream.
+///
+/// # Errors
+/// - `Error::HandshakeTimeout` if the full handshake doesn't complete
+///   within `HANDSHAKE_TIMEOUT` (10s).
+/// - `Error::HandshakeProtocol` on malformed initiator exchange.
+/// - Underlying `quinn` / `Core` errors via `From`.
+#[tracing::instrument(
+    name = "handshake.responder",
+    skip(send, recv, my_side, conn),
+    fields(my_side = %hex::encode(my_side.public_bytes())),
+    err
+)]
 pub async fn run_responder(
     send: &mut quinn::SendStream,
     recv: &mut quinn::RecvStream,
@@ -204,7 +265,7 @@ async fn run_responder_inner(
         reason: None,
         eph_pub: my_eph_pub,
         extensions: vec![],
-        capabilities: Default::default(),
+        capabilities: local_capabilities(),
     };
     let helloback_env = Envelope::sign_with(
         MessageType::HELLO_BACK,
@@ -236,11 +297,20 @@ async fn run_responder_inner(
     let intent =
         Intent::from_u8(hello_payload.intent).ok_or(Error::HandshakeProtocol("unknown intent"))?;
 
-    Ok(Session::new(
+    if !hello_payload.capabilities.is_empty() {
+        debug!(
+            peer = %hex::encode(hello_env.from),
+            caps = ?hello_payload.capabilities,
+            "handshake: peer advertised capabilities"
+        );
+    }
+
+    Ok(Session::with_capabilities(
         conn.clone(),
         session_key,
         hello_env.from,
         intent,
+        hello_payload.capabilities,
     ))
 }
 
