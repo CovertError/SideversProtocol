@@ -22,7 +22,7 @@ use sidevers_core::linkage::LinkageProof;
 use sidevers_core::messages::direct::{DirectBody, DirectKind, DirectMessagePayload};
 use sidevers_core::payload as core_payload;
 use sidevers_core::{Address, AddressKind, Envelope, MasterKey, MessageType, SideKey};
-use sidevers_net::{Intent, Node, fetch_object, send_dm};
+use sidevers_net::{Intent, Node, SideStore, StoredSide, fetch_object, send_dm};
 use sidevers_storage::ObjectStore;
 
 #[derive(Parser, Debug)]
@@ -53,6 +53,42 @@ enum Command {
     Store(StoreCmd),
     /// Open + handshake against a peer, then close.
     Ping(PingArgs),
+    /// Phase 3.I: multi-side management against a persistent data dir.
+    #[command(subcommand)]
+    Side(SideCmd),
+}
+
+#[derive(Subcommand, Debug)]
+enum SideCmd {
+    /// Mint a fresh side keypair, persist it in `<data_dir>/sides.db`,
+    /// and print its bech32m address.
+    Add {
+        /// Data directory containing (or to contain) `sides.db`.
+        #[arg(long)]
+        data_dir: PathBuf,
+        /// Label for the new side (e.g. "work", "private").
+        #[arg(long)]
+        label: String,
+    },
+    /// List every side persisted in `<data_dir>/sides.db`, with label
+    /// + bech32m address + lifecycle.
+    List {
+        #[arg(long)]
+        data_dir: PathBuf,
+    },
+    /// Retire a side: signs + records a `SideRetirement` for the named
+    /// side. Once retired the lifecycle flips to `Retired` and future
+    /// peers SHOULD treat new envelopes from this side as anomalous.
+    Retire {
+        #[arg(long)]
+        data_dir: PathBuf,
+        /// Path to the side's 32-byte seed.
+        #[arg(long)]
+        side: PathBuf,
+        /// Optional human-readable reason recorded in the retirement record.
+        #[arg(long)]
+        reason: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -241,7 +277,83 @@ pub async fn run() -> Result<()> {
             out,
         }) => store_get(&side, &host, &hash, &out).await,
         Command::Ping(args) => node_ping(&args.side, &args.host).await,
+        Command::Side(SideCmd::Add { data_dir, label }) => side_add(&data_dir, &label).await,
+        Command::Side(SideCmd::List { data_dir }) => side_list(&data_dir).await,
+        Command::Side(SideCmd::Retire {
+            data_dir,
+            side,
+            reason,
+        }) => side_retire(&data_dir, &side, reason).await,
     }
+}
+
+// ============================================================================
+// side subcommands (Phase 3.I)
+// ============================================================================
+
+async fn side_add(data_dir: &Path, label: &str) -> Result<()> {
+    tokio::fs::create_dir_all(data_dir)
+        .await
+        .with_context(|| format!("creating {}", data_dir.display()))?;
+    let store = SideStore::open(data_dir).await?;
+    let master = MasterKey::generate().context("generating master key")?;
+    let side = master
+        .derive_side(&label.into())
+        .with_context(|| format!("deriving side for label {label:?}"))?;
+    let address = side.public_bytes();
+    let now = now_unix_seconds().context("clock")?;
+    let stored = StoredSide {
+        address,
+        seed: side.to_seed(),
+        label: Some(label.to_owned()),
+        created_at: now,
+        lifecycle: "Created".to_owned(),
+        last_send_at: None,
+        is_self_retired: false,
+    };
+    store.upsert_side(&stored).await?;
+    println!("{}", Address::new(AddressKind::Side, address).encode());
+    eprintln!(
+        "added side {label:?} → {} (lifecycle Created)",
+        hex::encode(address)
+    );
+    Ok(())
+}
+
+async fn side_list(data_dir: &Path) -> Result<()> {
+    let store = SideStore::open(data_dir).await?;
+    let sides = store.list_sides().await?;
+    if sides.is_empty() {
+        eprintln!("no sides hosted in {}", data_dir.display());
+        return Ok(());
+    }
+    println!("LABEL\tADDRESS\tLIFECYCLE\tRETIRED");
+    for s in sides {
+        println!(
+            "{}\t{}\t{}\t{}",
+            s.label.as_deref().unwrap_or("(none)"),
+            Address::new(AddressKind::Side, s.address).encode(),
+            s.lifecycle,
+            if s.is_self_retired { "yes" } else { "no" },
+        );
+    }
+    Ok(())
+}
+
+async fn side_retire(data_dir: &Path, side_path: &Path, reason: Option<String>) -> Result<()> {
+    let seed = read_seed(side_path)?;
+    let side = SideKey::from_seed(&seed, "(cli-retire)");
+    let listen = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+    let node = Node::start(side, listen, data_dir).await?;
+    let record = node.publish_retirement(reason).await?;
+    node.shutdown().await;
+    eprintln!(
+        "retired side {} at {} ({})",
+        Address::new(AddressKind::Side, record.side),
+        record.retired_at,
+        record.reason.as_deref().unwrap_or("(no reason)"),
+    );
+    Ok(())
 }
 
 // ============================================================================
