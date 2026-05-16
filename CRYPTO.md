@@ -156,6 +156,8 @@ calls into one of the above libraries.
 
 ### 2.10 FFI surface (Phase-3 mobile lite mode)
 
+
+
 | Operation | Function | Source |
 |-----------|----------|--------|
 | Master keygen | `sv_keygen_master` | `crates/sidevers-ffi/src/keys.rs` |
@@ -175,6 +177,44 @@ library crate has `#![forbid(unsafe_code)]` at the top of its `lib.rs`. The
 FFI's unsafety is restricted to the boundary code that converts C raw
 pointers / lengths into Rust slices, with `// SAFETY:` comments at every
 dereference describing the caller contract.
+
+### 2.11 Public-layer payloads (spec §9, Phase 2 wire scaffold)
+
+| Operation | Source | Notes |
+|-----------|--------|-------|
+| `HandleResolve` (0x60) | `crates/sidevers-core/src/messages/public.rs` | unsigned request payload |
+| `HandleAttest` (0x61) | same | signed: side claims a handle |
+| `PagePublish` (0x62) | same | signed: 6-field signed page (slug, mime, content, published_at) |
+| `PageFetch` (0x63) | same | unsigned request |
+| `PageDeliver` (0x64) | same | wraps a signed `PagePublish` as opaque bstr |
+| `Announcement` (0x65) | same | signed: gossip-fanout broadcast |
+| `DirectoryEntry` (0x66) | same | composite: aggregates per-side `HandleAttest`s |
+
+The Rust node **ships these codecs but no `serve_public` handler**. The
+Phase 2 spec is deliberately Laravel-side (the sidevers.com registry
+crate is a separate repo). The codecs let a client sign + dispatch
+public-layer envelopes over an existing Direct or Gossip intent
+session; the registry's dispatch semantics are out of scope here.
+
+### 2.12 Operational layers (Phase 1 H1–H4, B1)
+
+| Concern | Source | Notes |
+|---------|--------|-------|
+| Per-source-IP handshake rate limit (§4.6) | `crates/sidevers-net/src/handshake_limit.rs` | token bucket per `IpAddr`; checked before responder handshake runs |
+| TLS cert pinning + permissive default | `crates/sidevers-net/src/cert.rs` | `CertPinTable` + `PinnedOrAccept` verifier. **Opt-in:** empty pin set = current "accept any well-formed cert" behavior; once pinned, BLAKE3 fingerprint must match. Default-permissive because Sidevers authenticates at the protocol layer (Hello/Confirm Ed25519), not TLS. |
+| QUIC connection pool | `crates/sidevers-net/src/connection_pool.rs` | keyed on `(peer_addr, source_side)` per §7.6 — two sides MUST NOT multiplex |
+| NAT hole-punching | `crates/sidevers-net/src/hole_punch.rs` | symmetric-retry double-connect; cone NATs only; symmetric-NAT prediction explicitly deferred |
+| Prometheus `/metrics` endpoint | `crates/sidevers-net/src/metrics.rs` | 14 counters; `serve_on_local(port)` binds 127.0.0.1 only; `serve_on(addr)` documented as "behind an external firewall" |
+| Gossip fanout WoT filter | `crates/sidevers-net/src/gossip_policy.rs` | configurable `Open` / `ExcludeRefused` / `RelationshipsOnly`; default `Open` |
+| Storage publisher provenance | `crates/sidevers-net/src/provenance.rs` | `STORAGE_RETRACT` only honored from sides recorded as publishers; unpin only when last publisher retracts |
+| Replay cache memory bound | `crates/sidevers-core/src/replay.rs` | `DEFAULT_MAX_ENTRIES = 16_384`; oldest-first eviction with optional journal write-through |
+| Replay cache persistence | `crates/sidevers-net/src/replay_journal.rs` | SQLite journal; WAL + synchronous=NORMAL; window survives restart |
+| LRU storage eviction | `crates/sidevers-storage/src/object.rs` `evict_to_budget` + `objects_evict` index in `db.rs` | unpinned objects only; pinned never evict |
+| Object chunking | `crates/sidevers-storage/src/chunking.rs` | 256 KiB chunks + content-addressed manifest; `out.len() == declared_total` sanity check |
+| Inbox persistence | `crates/sidevers-net/src/inbox_store.rs` | SQLite; WAL pragmas; per-recipient list ordered by received_at |
+| Clock-skew graceful fallback | `crates/sidevers-core/src/envelope.rs` `SOFT_MAX_SKEW_SECS = 900` | tiered: ≤300s silent, 300–900s warn-and-accept, >900s reject |
+| Filesystem permissions | `crates/sidevers-net/src/fs_perms.rs` | every SQLite file chmod 0o600, data dirs chmod 0o700 on Unix |
+| Feature deprecation pipeline | `crates/sidevers-core/src/features.rs` | `FeatureState::{Active, Deprecated, Frozen}` registry; `phase1_baseline()` lists every wire feature |
 
 ---
 
@@ -251,46 +291,50 @@ or genuine gaps to flag.
    should confirm this is acceptable** and the spec should be amended to
    match before v1.0 final. See `payload.rs` top comment.
 
-2. **Per-source handshake rate-limiting is not yet implemented.** Spec
-   §4.6 SHOULD-recommends it. The TLS layer's own connection limits
-   provide a coarse defense; protocol-level token-bucket per peer is
-   Phase-1.5d hardening.
+2. ~~Per-source handshake rate-limiting is not yet implemented.~~
+   **CLOSED Phase 1.D** — `crates/sidevers-net/src/handshake_limit.rs`
+   adds a per-source-IP token bucket consulted before the responder
+   handshake runs.
 
-3. **Web-of-trust gossip filter is not implemented.** Spec §6.9. Our
-   gossip currently filters only by explicit subscription set; the
-   reachable-by-follow-graph filter the spec describes is Phase-2 work
-   tied to follow-graph protocol additions (currently §7.4 contacts are
-   private — there's no protocol message for "who follows whom" yet).
+3. **Web-of-trust gossip filter is opt-in.** Spec §6.9. The
+   `GossipPolicy::ExcludeRefused` and `RelationshipsOnly` modes in
+   `gossip_policy.rs` are wired but `Open` remains the default so
+   existing dispatch tests pass. The reachable-by-follow-graph
+   semantics depend on follow-graph protocol additions that are still
+   Phase-2 work; the operator-tunable infrastructure is present.
 
-4. **Storage `Retract` is overbroad.** Honest nodes that receive a
-   retract unpin the local object. They don't currently track per-
-   publisher provenance (multiple publishers could reference the same
-   content-addressed bytes; one publisher's retract shouldn't affect
-   another publisher's reference). This will improve once Phase-2
-   storage gains a real per-reference table.
+4. ~~Storage `Retract` is overbroad.~~ **CLOSED Phase 1.C3** —
+   `provenance.rs` tracks the set of publishers per content-addressed
+   hash; `STORAGE_RETRACT` only fires when the sender is recorded as a
+   publisher, and unpin only when the last publisher retracts.
 
-5. **Multiple verse moderators aren't on the wire.** Spec §8.2 + §8.9
-   describe moderators as sides listed in the contract. Phase 1.5b/c
-   treats the verse's own keypair as the sole moderator. Adding the
-   `moderators` field to `ContractObject` (and the multi-mod removal
-   logic) is Phase 1.5d.
+5. ~~Multiple verse moderators aren't on the wire.~~ **CLOSED Phase
+   1.5.B** — `ContractObject.moderators: Vec<[u8; 32]>` is now part of
+   the canonical 12-key signed form; `VERSE_REMOVE` accepts any
+   moderator's signed envelope. See §8.3 row above for the wire-format
+   note: **the change is incompatible with pre-1.5.B serializations.**
 
-6. **No persistent storage for verse posts.** Posts the host receives
-   are delivered to `next_verse_post()` and dropped. Persistence is a
-   Phase-2 storage refinement.
+6. **Verse-post persistence is in-memory only.** Phase 1.5.D added
+   `crates/sidevers-net/src/verse_post_store.rs` which retains sealed
+   posts so `DataDisposition::Retract` can act on them, but the store
+   doesn't survive restart. A SQLite-backed `VersePostStore` is
+   straightforward (mirror the `replay_journal.rs` pattern) but kept
+   for Phase 2.
 
 7. **The DataDisposition `transfer` option is wire-correct but inert.**
-   Spec §8.8 says the disposition is advisory; we honor `retract` (in-
-   memory state cleared) but `transfer` (export-with-data) is a UX-driven
-   client feature, not a protocol mechanism.
+   Spec §8.8 says the disposition is advisory; we honor `retract`
+   (drops the author's stored posts via `retract_by_author` Phase 1.5.D)
+   but `transfer` (export-with-data) is a UX-driven client feature,
+   not a protocol mechanism.
 
 8. **Session resumption (0-RTT) is deliberately not implemented**, per
    spec §4.7. v1's freshness guarantees depend on the full handshake
    each time.
 
-9. **NAT hole-punching is not implemented.** The Rendezvous protocol
-   exchange works on localhost. Real UDP hole-punching through symmetric
-   NAT is Phase-2 NAT-traversal work tied to the relay infrastructure.
+9. ~~NAT hole-punching is not implemented.~~ **CLOSED Phase 1.B1** —
+   `crates/sidevers-net/src/hole_punch.rs` ships a symmetric-retry
+   double-connect that handles cone NATs. Symmetric-NAT prediction
+   (which needs STUN-style port prediction) is still deferred.
 
 10. **iOS/Android runtime testing is not in CI.** Cross-compile checks
     (compile-only) are in CI for all five mobile targets. Runtime tests
@@ -312,12 +356,16 @@ or genuine gaps to flag.
 12. **Side seed stored in cleartext in SQLite.** The `sides.seed` column
     in `<data_dir>/sides.db` holds the 32-byte side secret in the clear.
     Loss of the DB file = loss of all side identities + ability to
-    impersonate any hosted side. Mitigations: the deployer is expected
-    to keep the data_dir under OS-level disk encryption (FileVault on
-    macOS, LUKS on Linux, BitLocker on Windows, and the iOS/Android
-    app-private-data sandbox on mobile). Application-level encryption
-    via OS keychain-derived KEK is a Phase 2 hardening when the
-    distribution model warrants it.
+    impersonate any hosted side. Mitigations: **Phase 1.H1 audit-pass
+    added `fs_perms.rs`** which chmods the file to 0o600 + the data
+    dir to 0o700 on every store open (Unix only; no-op on Windows).
+    Other local users on the same Unix box can no longer read the
+    seed. The deployer is still expected to keep the data_dir under
+    OS-level disk encryption (FileVault on macOS, LUKS on Linux,
+    BitLocker on Windows, and the iOS/Android app-private-data sandbox
+    on mobile). Application-level encryption via OS keychain-derived
+    KEK is a Phase 2 hardening when the distribution model warrants
+    it.
 
 13. **Multi-device network-level revocation is local-only.** When a
     co-holder publishes `DeviceRevoke` (0x28), other co-holders mark the
@@ -328,6 +376,42 @@ or genuine gaps to flag.
     other co-holder's. Proper network-level revocation requires per-
     device attestation chains (each device has its own keypair, side
     delegates with signed records). Phase 1.5h+.
+
+14. **TLS cert pinning is opt-in / `permissive` by default.** Phase 1.H2
+    added the pinning machinery (`cert.rs`) but the default verifier
+    is `PinnedOrAccept` with an empty pin set — i.e. "accept any
+    well-formed cert." This preserves the pre-1.H2 behavior the
+    Sidevers handshake at the protocol layer (Hello/Confirm Ed25519)
+    relies on for identity. Operators who want defense-in-depth pin
+    expected peer cert fingerprints via `Node::cert_pins().pin(addr,
+    hash)`. The pin verifier is then enforced for those addresses.
+
+15. **Metrics endpoint has no auth.** Phase 1.H3 added a Prometheus
+    `/metrics` endpoint that exposes counter values without any
+    authentication or TLS. Counter values reveal operationally-sensitive
+    information — peer pubkeys that have spoken to this node + at what
+    rate. Operators MUST bind it to a private interface; the
+    `Metrics::serve_on_local(port)` convenience binds to `127.0.0.1`
+    only. The general `serve_on(addr)` is documented with a Security
+    block warning against `0.0.0.0` binds.
+
+16. **Tauri client CSP includes `style-src 'self' 'unsafe-inline'`.**
+    Needed because the `qrcode` crate emits SVG with inline `style`
+    attributes. `'unsafe-inline'` is a broad CSS-injection permission
+    that's currently safe because we don't render attacker-supplied
+    SVG, but it should be dropped once the QR rendering moves to
+    canvas / `<img src="data:…">` (Phase 2 client polish). All other
+    CSP directives are tight: `default-src 'self'`, `object-src
+    'none'`, `frame-src 'none'`, `base-uri 'self'`, `form-action
+    'none'`.
+
+17. **The Phase 2 Public-layer payloads have no `serve_public` handler.**
+    `crates/sidevers-core/src/messages/public.rs` ships codecs for all
+    seven Public-layer message types (§2.11) but the node doesn't have
+    a Public-intent server loop yet. By design — Phase 2 dispatch is
+    a sidevers.com Laravel registry concern, and committing prematurely
+    to handler semantics here would couple the reference node to a
+    spec that hasn't fully landed. The codecs are ready when needed.
 
 ---
 
