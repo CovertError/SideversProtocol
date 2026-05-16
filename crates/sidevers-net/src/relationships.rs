@@ -38,6 +38,12 @@ pub struct SideRelationship {
     pub pinned: bool,
     /// Unix seconds at which the relationship was first recorded.
     pub added_at: u64,
+    /// Last-known network endpoint we'd dial to reach this contact
+    /// (Phase 3 Stage C). `None` means "endpoint unknown" — the UI
+    /// prompts once on the first chat attempt and persists what it
+    /// gets back. Never on the wire — local only, like everything
+    /// else in this struct.
+    pub peer_listen_addr: Option<String>,
 }
 
 /// In-memory directory of relationships for this node's hosted side.
@@ -165,6 +171,7 @@ mod tests {
             notes: None,
             pinned: false,
             added_at: 1_700_000_000,
+            peer_listen_addr: None,
         }
     }
 

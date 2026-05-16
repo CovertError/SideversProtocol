@@ -596,6 +596,10 @@ impl Side {
 
 fn relationship_from_record(rec: &RelationshipRecord) -> SideRelationship {
     let caps: std::collections::BTreeSet<String> = rec.capabilities.iter().cloned().collect();
+    // RelationshipRecord is the wire-format mirror used in state bundles
+    // shipped between co-holders. It does not carry the local-only
+    // `peer_listen_addr` cache; new co-holders rediscover endpoints from
+    // their own usage. Default to None when reconstructing.
     SideRelationship {
         address: rec.address,
         nickname: rec.nickname.clone(),
@@ -604,6 +608,7 @@ fn relationship_from_record(rec: &RelationshipRecord) -> SideRelationship {
         notes: rec.notes.clone(),
         pinned: rec.pinned,
         added_at: rec.added_at,
+        peer_listen_addr: None,
     }
 }
 
@@ -674,6 +679,7 @@ mod tests {
                 notes: None,
                 pinned: true,
                 added_at: 1_700_000_000,
+                peer_listen_addr: None,
             })
             .await;
         drop(side1);

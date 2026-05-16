@@ -31,7 +31,7 @@ use serde::Serialize;
 use sidevers_core::keys::{MasterKey, SECRET_KEY_LEN, SideKey};
 use sidevers_core::messages::direct::{DirectBody, DirectKind, DirectMessagePayload};
 use sidevers_core::payload as core_payload;
-use sidevers_core::{Address, AddressKind, Envelope, MessageType, PairingQr, ProfilePayload};
+use sidevers_core::{Address, AddressKind, ContactCard, Envelope, MessageType, PairingQr, ProfilePayload};
 use sidevers_net::{
     InboxEntry, InboxStore, Intent, Node, Session, SideRelationship, SideStore,
     send_dm as send_dm_helper,
@@ -43,6 +43,11 @@ use tokio::sync::Mutex;
 /// Key used in the SideStore `settings` table to gate the onboarding
 /// wizard. Set to "true" once the first-run flow completes.
 const SETTING_ONBOARDING_COMPLETED: &str = "onboarding_completed";
+
+/// Phase 3 Stage C — bech32 address of the side the user last had
+/// active. The frontend writes it on every side-switch; auto_start_node
+/// reads it to decide which side to put up first on relaunch.
+const SETTING_LAST_ACTIVE_SIDE: &str = "last_active_side";
 
 // ---------------------------------------------------------------------
 // Helpers
@@ -99,6 +104,11 @@ struct InboxDm {
     from: String,
     to: String,
     plaintext: String,
+    /// Phase 3 Stage C: Unix-seconds timestamp at which this node
+    /// received the DM. Lets the UI group threads by peer + sort
+    /// them by recency. Stored in `inbox.received_at`; live events
+    /// fill it with the current wall-clock at receive time.
+    received_at: u64,
 }
 
 // ---------------------------------------------------------------------
@@ -149,6 +159,187 @@ async fn complete_onboarding(data_dir: String) -> Result<(), String> {
         .await
         .map_err(|e| format!("write setting: {e}"))?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------
+// Phase 3 Stage C — settings + auto-start
+// ---------------------------------------------------------------------
+
+/// Read a single setting from the side store at `data_dir`. Returns
+/// `None` if the setting hasn't been written yet. Callers carry their
+/// own knowledge of valid keys (e.g. `last_active_side`, `theme`,
+/// `advanced_mode`); this is a thin generic wrapper.
+#[tauri::command]
+async fn get_setting(data_dir: String, key: String) -> Result<Option<String>, String> {
+    let dir = PathBuf::from(&data_dir);
+    if !dir.join("sides.db").exists() {
+        return Ok(None);
+    }
+    let store = SideStore::open(&dir)
+        .await
+        .map_err(|e| format!("opening side store: {e}"))?;
+    store
+        .get_setting(&key)
+        .await
+        .map_err(|e| format!("read setting: {e}"))
+}
+
+/// Write a single setting. Creates the side store if it doesn't yet
+/// exist (matches `complete_onboarding` posture).
+#[tauri::command]
+async fn set_setting(
+    data_dir: String,
+    key: String,
+    value: String,
+) -> Result<(), String> {
+    let dir = PathBuf::from(&data_dir);
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| format!("data_dir: {e}"))?;
+    let store = SideStore::open(&dir)
+        .await
+        .map_err(|e| format!("opening side store: {e}"))?;
+    store
+        .set_setting(&key, &value)
+        .await
+        .map_err(|e| format!("write setting: {e}"))
+}
+
+/// Phase 3 Stage C — chat-first boot path.
+///
+/// Loads every non-retired side from `<data_dir>/sides.db`, picks the
+/// "active" one (the `last_active_side` setting if set, else the
+/// first non-retired side), reconstructs its `SideKey` from the
+/// persisted seed, starts the node hosting it, and re-hosts every
+/// other non-retired side via `add_side`. Spawns the same inbox-drain
+/// task as `start_node`.
+///
+/// Distinct from `start_node` in one critical way: `start_node` mints
+/// a *fresh* master+side every call (used by the onboarding wizard's
+/// "create your first side" step). `auto_start_node` loads what's
+/// already there. The frontend calls `auto_start_node` on every
+/// post-onboarding launch; the wizard alone calls `start_node`.
+#[tauri::command]
+async fn auto_start_node(
+    data_dir: String,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<NodeInfo, String> {
+    let mut guard = state.node.lock().await;
+    if guard.is_some() {
+        return Err("node already running — stop it first".into());
+    }
+    let dir = PathBuf::from(&data_dir);
+    let store = SideStore::open(&dir)
+        .await
+        .map_err(|e| format!("opening side store: {e}"))?;
+    let sides = store
+        .list_sides()
+        .await
+        .map_err(|e| format!("list sides: {e}"))?;
+    if sides.is_empty() {
+        return Err("no persisted sides — run the onboarding wizard first".into());
+    }
+
+    // Pick the active side. Preference order:
+    //   1. settings.last_active_side (matched by bech32 address)
+    //   2. first non-retired side (BTreeMap address order)
+    let last_active = store
+        .get_setting(SETTING_LAST_ACTIVE_SIDE)
+        .await
+        .map_err(|e| format!("read last_active_side: {e}"))?;
+    let active = last_active
+        .as_deref()
+        .and_then(|s| decode_side_address(s).ok())
+        .and_then(|pk| sides.iter().find(|row| row.address == pk).cloned())
+        .or_else(|| sides.iter().find(|s| !s.is_self_retired).cloned())
+        .ok_or_else(|| "every persisted side is retired".to_owned())?;
+
+    let label = active.label.as_deref().unwrap_or("(restored)");
+    let side_key = SideKey::from_seed(&active.seed, label);
+
+    let listen = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+    let node = Arc::new(
+        Node::start(side_key, listen, &dir)
+            .await
+            .map_err(|e| format!("Node::start: {e}"))?,
+    );
+    let listen_addr = node.listen_addr();
+
+    // Re-host every other non-retired side so the side-rail UX has
+    // all the user's identities available on first paint.
+    for row in &sides {
+        if row.address == active.address || row.is_self_retired {
+            continue;
+        }
+        let other_label = row.label.as_deref().unwrap_or("(restored)");
+        let other_key = SideKey::from_seed(&row.seed, other_label);
+        let other_listen = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+        if let Err(e) = node.add_side(other_key, other_listen).await {
+            // Best-effort — one bad side shouldn't block boot.
+            eprintln!("auto_start_node: re-host side failed: {e}");
+        }
+    }
+
+    *guard = Some(node.clone());
+    drop(guard);
+
+    // Same persistent-inbox + drain wiring as start_node.
+    let inbox = Arc::new(InboxStore::open(&dir).map_err(|e| format!("inbox open: {e}"))?);
+    {
+        let mut ig = state.inbox.lock().await;
+        *ig = Some(inbox.clone());
+    }
+
+    let node_for_drain = node.clone();
+    let app_for_drain = app.clone();
+    let inbox_for_drain = inbox.clone();
+    tokio::spawn(async move {
+        while let Some(dm) = node_for_drain.next_direct_message().await {
+            let plaintext = String::from_utf8_lossy(&dm.plaintext).into_owned();
+            let from = Address::new(AddressKind::Side, dm.envelope.from).encode();
+            let to_addr = dm.envelope.to;
+            let to = to_addr
+                .map(|addr| Address::new(AddressKind::Side, addr).encode())
+                .unwrap_or_default();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if let Some(recipient) = to_addr {
+                inbox_for_drain.insert(&InboxEntry {
+                    to: recipient,
+                    from: dm.envelope.from,
+                    nonce: dm.envelope.nonce.to_vec(),
+                    wire_envelope: dm.envelope.to_wire_bytes(),
+                    plaintext: dm.plaintext.clone(),
+                    received_at: now,
+                });
+            }
+            let _ = app_for_drain.emit(
+                "inbox:dm",
+                InboxDm {
+                    from,
+                    to,
+                    plaintext,
+                    received_at: now,
+                },
+            );
+        }
+    });
+
+    // Persist last_active_side so a subsequent restart lands on the
+    // same identity even if the user didn't switch.
+    let active_address = Address::new(AddressKind::Side, active.address).encode();
+    let _ = store
+        .set_setting(SETTING_LAST_ACTIVE_SIDE, &active_address)
+        .await;
+
+    Ok(NodeInfo {
+        side_address: active_address,
+        side_address_hex: hex::encode(active.address),
+        listen_addr: listen_addr.to_string(),
+    })
 }
 
 /// Write the active node's primary side seed to a user-chosen path,
@@ -246,11 +437,11 @@ async fn start_node(
                 .map(|addr| Address::new(AddressKind::Side, addr).encode())
                 .unwrap_or_default();
             // Persist before emitting so a frontend reload sees the row.
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
             if let Some(recipient) = to_addr {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
                 inbox_for_drain.insert(&InboxEntry {
                     to: recipient,
                     from: dm.envelope.from,
@@ -260,7 +451,15 @@ async fn start_node(
                     received_at: now,
                 });
             }
-            let _ = app_for_drain.emit("inbox:dm", InboxDm { from, to, plaintext });
+            let _ = app_for_drain.emit(
+                "inbox:dm",
+                InboxDm {
+                    from,
+                    to,
+                    plaintext,
+                    received_at: now,
+                },
+            );
         }
     });
 
@@ -295,6 +494,7 @@ async fn load_inbox_history(
             from: Address::new(AddressKind::Side, e.from).encode(),
             to: Address::new(AddressKind::Side, e.to).encode(),
             plaintext: String::from_utf8_lossy(&e.plaintext).into_owned(),
+            received_at: e.received_at,
         })
         .collect())
 }
@@ -524,6 +724,9 @@ struct RelationshipView {
     notes: Option<String>,
     pinned: bool,
     added_at: u64,
+    /// Phase 3 Stage C: cached dial endpoint for this contact. `None`
+    /// means the UI must prompt before the first chat attempt.
+    peer_listen_addr: Option<String>,
 }
 
 #[tauri::command]
@@ -553,16 +756,22 @@ async fn list_relationships(
             notes: r.notes,
             pinned: r.pinned,
             added_at: r.added_at,
+            peer_listen_addr: r.peer_listen_addr,
         })
         .collect())
 }
 
+// add_relationship_cmd extended (Phase 3 Stage C): final `peer_listen_addr`
+// param is the network endpoint to dial when starting a chat. The chat-first
+// UI passes it when known (e.g. from a freshly-scanned ContactCard); callers
+// without that info pass `None` and the UI prompts on first chat.
 #[tauri::command]
 async fn add_relationship_cmd(
     side_address: String,
     peer_address: String,
     nickname: Option<String>,
     capabilities: Vec<String>,
+    peer_listen_addr: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let node = {
@@ -589,8 +798,51 @@ async fn add_relationship_cmd(
         notes: None,
         pinned: false,
         added_at: now,
+        peer_listen_addr,
     };
     side.add_relationship(r).await;
+    Ok(())
+}
+
+/// Update only the cached network endpoint for an existing
+/// relationship. Phase 3 Stage C — the chat UI calls this after the
+/// user fills in a peer's listen addr (e.g. after the first manual
+/// connect on a relationship that had `peer_listen_addr = None`).
+#[tauri::command]
+async fn update_relationship_endpoint(
+    side_address: String,
+    peer_address: String,
+    peer_listen_addr: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let node = {
+        let g = state.node.lock().await;
+        g.as_ref()
+            .cloned()
+            .ok_or_else(|| "node not started".to_owned())?
+    };
+    let side_pk = decode_side_address(&side_address)?;
+    let side = node
+        .side_by_address(&side_pk)
+        .await
+        .ok_or_else(|| "side not hosted on this node".to_owned())?;
+    let peer_pk = decode_side_address(&peer_address)?;
+    let addr = peer_listen_addr.trim();
+    if addr.is_empty() {
+        return Err("peer_listen_addr cannot be empty".to_owned());
+    }
+    // Validate socket-address shape — easier to reject here than at
+    // dial time. (Domain names aren't accepted by SocketAddr::parse;
+    // the desktop UI is IP:port-only for now.)
+    let _: SocketAddr = addr.parse().map_err(|e: std::net::AddrParseError| e.to_string())?;
+    let updated = side
+        .update_relationship(&peer_pk, |r| {
+            r.peer_listen_addr = Some(addr.to_owned());
+        })
+        .await;
+    if updated.is_none() {
+        return Err("no such relationship for this side".to_owned());
+    }
     Ok(())
 }
 
@@ -702,6 +954,129 @@ async fn accept_pairing_qr(
     Ok(PairingAcceptResp {
         joined_side: Address::new(AddressKind::Side, side.address).encode(),
         listen_addr: listen.to_string(),
+    })
+}
+
+// ---------------------------------------------------------------------
+// Phase 3 Stage C — ContactCard ("share me as a friend") QR
+// ---------------------------------------------------------------------
+// Distinct from PairingQr in that ContactCard carries no secrets —
+// just the side's public address + listen endpoint + an optional
+// display-name/side-label hint. Receiving it installs a relationship,
+// not a co-holder.
+
+#[derive(Serialize, Clone)]
+struct ContactQrResp {
+    uri: String,
+    svg: String,
+    /// What was packed into the QR (so the frontend can render a
+    /// preview without re-parsing).
+    display_name: Option<String>,
+    side_label: Option<String>,
+}
+
+#[tauri::command]
+async fn generate_contact_qr_svg(
+    side_address: String,
+    state: State<'_, AppState>,
+) -> Result<ContactQrResp, String> {
+    let node = {
+        let g = state.node.lock().await;
+        g.as_ref()
+            .cloned()
+            .ok_or_else(|| "node not started".to_owned())?
+    };
+    let side_pk = decode_side_address(&side_address)?;
+    let side = node
+        .side_by_address(&side_pk)
+        .await
+        .ok_or_else(|| "side not hosted on this node".to_owned())?;
+    let dial_addr = node
+        .side_listen_addr(&side_pk)
+        .await
+        .ok_or_else(|| "side has no listen address".to_owned())?
+        .to_string();
+    let profile = side.profile().await;
+    let display_name = profile.as_ref().and_then(|p| p.name.clone());
+    let side_label = side.label.clone();
+    let card = ContactCard {
+        side: side_pk,
+        dial_addr,
+        display_name: display_name.clone(),
+        side_label: side_label.clone(),
+    };
+    let uri = card.encode();
+    let svg = qrcode::QrCode::new(uri.as_bytes())
+        .map_err(|e| format!("qrcode: {e}"))?
+        .render::<qrcode::render::svg::Color>()
+        .min_dimensions(240, 240)
+        .quiet_zone(true)
+        .build();
+    Ok(ContactQrResp {
+        uri,
+        svg,
+        display_name,
+        side_label,
+    })
+}
+
+#[derive(Serialize, Clone)]
+struct ContactAcceptResp {
+    friend_address: String,
+    friend_dial_addr: String,
+    display_name: Option<String>,
+    side_label: Option<String>,
+}
+
+/// Parse a `sidevers-contact:1:` URI and save the carried contact as
+/// a relationship on the named hosted side. The new relationship
+/// gets `capabilities = ["direct-message"]` by default and the QR's
+/// `display_name` (if any) as nickname.
+#[tauri::command]
+async fn accept_contact_qr(
+    side_address: String,
+    qr_uri: String,
+    state: State<'_, AppState>,
+) -> Result<ContactAcceptResp, String> {
+    let node = {
+        let g = state.node.lock().await;
+        g.as_ref()
+            .cloned()
+            .ok_or_else(|| "node not started".to_owned())?
+    };
+    let card = ContactCard::parse(qr_uri.trim()).map_err(|e| format!("parse contact QR: {e}"))?;
+    let side_pk = decode_side_address(&side_address)?;
+    let side = node
+        .side_by_address(&side_pk)
+        .await
+        .ok_or_else(|| "side not hosted on this node".to_owned())?;
+    // Refuse to friend yourself — UI should also gate this, but
+    // belt-and-braces.
+    if side.address == card.side {
+        return Err("can't add yourself as a contact".to_owned());
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut caps = BTreeSet::new();
+    caps.insert("direct-message".to_owned());
+    let rel = SideRelationship {
+        address: card.side,
+        nickname: card.display_name.clone(),
+        introduced_by: None,
+        capabilities: caps,
+        notes: None,
+        pinned: false,
+        added_at: now,
+        peer_listen_addr: Some(card.dial_addr.clone()),
+    };
+    side.add_relationship(rel).await;
+    Ok(ContactAcceptResp {
+        friend_address: Address::new(AddressKind::Side, card.side).encode(),
+        friend_dial_addr: card.dial_addr,
+        display_name: card.display_name,
+        side_label: card.side_label,
     })
 }
 
@@ -854,14 +1229,22 @@ fn main() {
             list_relationships,
             add_relationship_cmd,
             remove_relationship_cmd,
+            update_relationship_endpoint,
             // Phase 3.D onboarding wizard
             default_data_dir,
             is_onboarded,
             complete_onboarding,
             write_seed_backup,
+            // Phase 3 Stage C — settings + chat-first boot
+            get_setting,
+            set_setting,
+            auto_start_node,
             // Multi-device pairing (Phase 3.C)
             generate_pairing_qr_svg,
             accept_pairing_qr,
+            // Phase 3 Stage C — "share me as a friend" QR
+            generate_contact_qr_svg,
+            accept_contact_qr,
             // Legacy key-only commands (offline tooling)
             generate_master,
             derive_side,

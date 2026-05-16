@@ -649,6 +649,161 @@ impl DeviceRevokePayload {
 }
 
 // =========================================================================
+// ContactCard — "share me as a friend" QR (Phase 3 Stage C)
+// =========================================================================
+//
+// Distinct from PairingQr in three ways:
+//   * No nonce. ContactCard carries only PUBLIC information; no
+//     handshake state to bind to.
+//   * No side seed. The receiver becomes a *contact*, not a co-holder.
+//     Adding a contact requires zero private-key material from the
+//     publisher.
+//   * Different URI scheme (`sidevers-contact:1:` vs `sidevers-pair:1:`)
+//     so a frontend paste/scan auto-routes to the right handler and a
+//     contact-card paste can never accidentally trigger a pairing
+//     handshake.
+//
+// Wire layout (after base32 decode):
+//   1B  version (0x01)
+//   32B side public key
+//   2B  display_name length (u16 BE)   — UTF-8 string, 0..=512 bytes
+//   N   display_name bytes
+//   2B  side_label length (u16 BE)     — UTF-8 string, 0..=64 bytes
+//   N   side_label bytes
+//   2B  dial_addr length (u16 BE)      — UTF-8 string, 1..=256 bytes
+//   N   dial_addr bytes
+
+/// QR-encoded "add me as a friend" code. URI scheme
+/// `sidevers-contact:1:<base32>` (lowercase, no padding). Carries
+/// the side's public address, an optional display name + side label
+/// for UI hints, and the network address to dial.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContactCard {
+    /// Side public key (Ed25519, 32 bytes).
+    pub side: [u8; 32],
+    /// Network address the friend's client should dial. UTF-8.
+    pub dial_addr: String,
+    /// Optional display name to show on first encounter. The receiver
+    /// is free to override locally; never wire-validated.
+    pub display_name: Option<String>,
+    /// Optional side label (e.g. "work", "private") — gives the
+    /// recipient a hint about which context this is.
+    pub side_label: Option<String>,
+}
+
+const CONTACT_QR_VERSION: u8 = 0x01;
+const CONTACT_QR_SCHEME_PREFIX: &str = "sidevers-contact:1:";
+const CONTACT_DISPLAY_NAME_MAX: usize = 512;
+const CONTACT_SIDE_LABEL_MAX: usize = 64;
+const CONTACT_DIAL_ADDR_MAX: usize = 256;
+
+impl ContactCard {
+    /// Encode to URI form.
+    pub fn encode(&self) -> String {
+        let dn = self.display_name.as_deref().unwrap_or("");
+        let sl = self.side_label.as_deref().unwrap_or("");
+        let da = self.dial_addr.as_str();
+        let mut buf = Vec::with_capacity(1 + 32 + 2 + dn.len() + 2 + sl.len() + 2 + da.len());
+        buf.push(CONTACT_QR_VERSION);
+        buf.extend_from_slice(&self.side);
+        buf.extend_from_slice(&(dn.len() as u16).to_be_bytes());
+        buf.extend_from_slice(dn.as_bytes());
+        buf.extend_from_slice(&(sl.len() as u16).to_be_bytes());
+        buf.extend_from_slice(sl.as_bytes());
+        buf.extend_from_slice(&(da.len() as u16).to_be_bytes());
+        buf.extend_from_slice(da.as_bytes());
+        let b32 = base32_encode(&buf);
+        format!("{CONTACT_QR_SCHEME_PREFIX}{b32}")
+    }
+
+    /// Parse from URI form. Rejects truncated, oversized, or non-UTF-8
+    /// fields. A successful parse means the payload was well-formed —
+    /// it says nothing about whether the side is one the caller wants
+    /// to befriend; that's a UI-level confirmation.
+    pub fn parse(s: &str) -> Result<Self> {
+        let rest = s
+            .strip_prefix(CONTACT_QR_SCHEME_PREFIX)
+            .ok_or_else(|| Error::CborDecode("contact QR: missing scheme prefix".into()))?;
+        let bytes = base32_decode(rest)
+            .ok_or_else(|| Error::CborDecode("contact QR: bad base32".into()))?;
+        if bytes.is_empty() || bytes[0] != CONTACT_QR_VERSION {
+            return Err(Error::CborDecode("contact QR: bad version".into()));
+        }
+        // 1 (version) + 32 (side) + 2 + 2 + 2 (three length prefixes) = 39
+        if bytes.len() < 1 + 32 + 6 {
+            return Err(Error::CborDecode("contact QR: truncated".into()));
+        }
+        let mut side = [0u8; 32];
+        side.copy_from_slice(&bytes[1..33]);
+
+        let mut pos = 33usize;
+        let (display_name, new_pos) = read_lp_string(
+            &bytes,
+            pos,
+            CONTACT_DISPLAY_NAME_MAX,
+            "contact QR: display_name",
+        )?;
+        pos = new_pos;
+        let (side_label, new_pos) = read_lp_string(
+            &bytes,
+            pos,
+            CONTACT_SIDE_LABEL_MAX,
+            "contact QR: side_label",
+        )?;
+        pos = new_pos;
+        let (dial_addr, new_pos) =
+            read_lp_string(&bytes, pos, CONTACT_DIAL_ADDR_MAX, "contact QR: dial_addr")?;
+        if dial_addr.is_empty() {
+            return Err(Error::CborDecode("contact QR: empty dial_addr".into()));
+        }
+        if new_pos != bytes.len() {
+            return Err(Error::CborDecode("contact QR: trailing bytes".into()));
+        }
+        Ok(Self {
+            side,
+            dial_addr,
+            display_name: if display_name.is_empty() {
+                None
+            } else {
+                Some(display_name)
+            },
+            side_label: if side_label.is_empty() {
+                None
+            } else {
+                Some(side_label)
+            },
+        })
+    }
+}
+
+/// Read a length-prefixed (u16-BE) UTF-8 string starting at `pos`.
+/// Returns the parsed string and the position after the field. Rejects
+/// runs over `max_len` or off the end of the buffer.
+fn read_lp_string(
+    bytes: &[u8],
+    pos: usize,
+    max_len: usize,
+    field: &'static str,
+) -> Result<(String, usize)> {
+    if pos + 2 > bytes.len() {
+        return Err(Error::CborDecode(format!("{field}: missing length")));
+    }
+    let len = u16::from_be_bytes([bytes[pos], bytes[pos + 1]]) as usize;
+    let start = pos + 2;
+    let end = start + len;
+    if end > bytes.len() {
+        return Err(Error::CborDecode(format!("{field}: truncated body")));
+    }
+    if len > max_len {
+        return Err(Error::CborDecode(format!("{field}: oversized")));
+    }
+    let s = core::str::from_utf8(&bytes[start..end])
+        .map_err(|_| Error::CborDecode(format!("{field}: not utf-8")))?
+        .to_owned();
+    Ok((s, end))
+}
+
+// =========================================================================
 // PairingQr — URI codec for the QR code the existing device shows
 // =========================================================================
 
@@ -1747,6 +1902,100 @@ mod tests {
     #[test]
     fn pairing_qr_rejects_bad_prefix() {
         assert!(PairingQr::parse("https://example.com").is_err());
+    }
+
+    #[test]
+    fn contact_card_round_trip_full() {
+        let c = ContactCard {
+            side: [0xAB; 32],
+            dial_addr: "192.168.1.7:50101".to_owned(),
+            display_name: Some("Omar @ Cyberagora".to_owned()),
+            side_label: Some("work".to_owned()),
+        };
+        let s = c.encode();
+        assert!(s.starts_with(CONTACT_QR_SCHEME_PREFIX));
+        let parsed = ContactCard::parse(&s).unwrap();
+        assert_eq!(parsed, c);
+    }
+
+    #[test]
+    fn contact_card_round_trip_no_optional_fields() {
+        let c = ContactCard {
+            side: [0x01; 32],
+            dial_addr: "127.0.0.1:50001".to_owned(),
+            display_name: None,
+            side_label: None,
+        };
+        let s = c.encode();
+        let parsed = ContactCard::parse(&s).unwrap();
+        assert_eq!(parsed, c);
+        // Empty strings round-trip as None, not Some("").
+        assert!(parsed.display_name.is_none());
+        assert!(parsed.side_label.is_none());
+    }
+
+    #[test]
+    fn contact_card_rejects_bad_prefix() {
+        assert!(ContactCard::parse("sidevers-pair:1:abc").is_err());
+        assert!(ContactCard::parse("https://example.com").is_err());
+        assert!(ContactCard::parse("").is_err());
+    }
+
+    #[test]
+    fn contact_card_rejects_empty_dial_addr() {
+        let c = ContactCard {
+            side: [0x01; 32],
+            dial_addr: String::new(),
+            display_name: None,
+            side_label: None,
+        };
+        let s = c.encode();
+        // Encoder happily produces it; decoder must refuse.
+        assert!(ContactCard::parse(&s).is_err());
+    }
+
+    #[test]
+    fn contact_card_rejects_truncated_payload() {
+        let c = ContactCard {
+            side: [0x01; 32],
+            dial_addr: "127.0.0.1:50001".to_owned(),
+            display_name: None,
+            side_label: None,
+        };
+        let s = c.encode();
+        // Drop the last few base32 chars — the decoded buffer will
+        // be missing its trailing dial_addr bytes.
+        let truncated = &s[..s.len() - 6];
+        assert!(ContactCard::parse(truncated).is_err());
+    }
+
+    #[test]
+    fn contact_card_rejects_oversized_display_name() {
+        let mut buf = Vec::new();
+        buf.push(CONTACT_QR_VERSION);
+        buf.extend_from_slice(&[0; 32]);
+        // Claim a display_name length > CONTACT_DISPLAY_NAME_MAX, even
+        // though the actual body would be that long.
+        buf.extend_from_slice(&((CONTACT_DISPLAY_NAME_MAX as u16 + 1).to_be_bytes()));
+        buf.extend(std::iter::repeat_n(b'x', CONTACT_DISPLAY_NAME_MAX + 1));
+        buf.extend_from_slice(&0u16.to_be_bytes()); // empty side_label
+        buf.extend_from_slice(&5u16.to_be_bytes());
+        buf.extend_from_slice(b"a:b:c");
+        let s = format!("{}{}", CONTACT_QR_SCHEME_PREFIX, base32_encode(&buf));
+        assert!(ContactCard::parse(&s).is_err());
+    }
+
+    #[test]
+    fn contact_card_rejects_wrong_version_byte() {
+        let mut buf = Vec::new();
+        buf.push(0x02); // not 0x01
+        buf.extend_from_slice(&[0; 32]);
+        buf.extend_from_slice(&0u16.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes());
+        buf.extend_from_slice(&5u16.to_be_bytes());
+        buf.extend_from_slice(b"a:b:c");
+        let s = format!("{}{}", CONTACT_QR_SCHEME_PREFIX, base32_encode(&buf));
+        assert!(ContactCard::parse(&s).is_err());
     }
 
     #[test]

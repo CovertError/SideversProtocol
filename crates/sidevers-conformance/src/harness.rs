@@ -1471,6 +1471,7 @@ mod tests {
             notes: None,
             pinned: false,
             added_at: 1_700_000_000,
+            peer_listen_addr: None,
         }
     }
 

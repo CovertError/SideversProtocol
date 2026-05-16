@@ -33,7 +33,10 @@ use crate::relationships::SideRelationship;
 ///      to support live state delta push between co-holders.
 /// v3 — Phase 3.D: adds `settings` (key, value) table for small
 ///      durable preferences (onboarding_completed, active_side, etc).
-pub const SCHEMA_VERSION: i64 = 3;
+/// v4 — Phase 3 Stage C: adds `peer_listen_addr` column to relationships.
+///      Caches the last-known network endpoint for each saved friend so
+///      "click a friend → start chat" can dial without re-prompting.
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Newline character used to separate capability tokens in the
 /// relationships.capabilities TEXT column. Capability tokens are
@@ -104,6 +107,7 @@ impl SideStore {
                 conn.execute_batch(SCHEMA_V1).map_err(map_sqlite)?;
                 conn.execute_batch(SCHEMA_V2_DELTA).map_err(map_sqlite)?;
                 conn.execute_batch(SCHEMA_V3_DELTA).map_err(map_sqlite)?;
+                conn.execute_batch(SCHEMA_V4_DELTA).map_err(map_sqlite)?;
                 conn.execute(
                     "INSERT INTO schema_version (version) VALUES (?1)",
                     params![SCHEMA_VERSION],
@@ -113,6 +117,7 @@ impl SideStore {
             Some(v) if v < 2 => {
                 conn.execute_batch(SCHEMA_V2_DELTA).map_err(map_sqlite)?;
                 conn.execute_batch(SCHEMA_V3_DELTA).map_err(map_sqlite)?;
+                conn.execute_batch(SCHEMA_V4_DELTA).map_err(map_sqlite)?;
                 conn.execute(
                     "UPDATE schema_version SET version = ?1",
                     params![SCHEMA_VERSION],
@@ -121,6 +126,15 @@ impl SideStore {
             }
             Some(v) if v < 3 => {
                 conn.execute_batch(SCHEMA_V3_DELTA).map_err(map_sqlite)?;
+                conn.execute_batch(SCHEMA_V4_DELTA).map_err(map_sqlite)?;
+                conn.execute(
+                    "UPDATE schema_version SET version = ?1",
+                    params![SCHEMA_VERSION],
+                )
+                .map_err(map_sqlite)?;
+            }
+            Some(v) if v < 4 => {
+                conn.execute_batch(SCHEMA_V4_DELTA).map_err(map_sqlite)?;
                 conn.execute(
                     "UPDATE schema_version SET version = ?1",
                     params![SCHEMA_VERSION],
@@ -363,14 +377,15 @@ impl SideStore {
         let caps_blob = encode_capabilities(&r.capabilities);
         let conn = self.conn.lock().await;
         conn.execute(
-            "INSERT INTO relationships (side_address, peer_address, nickname, introduced_by, capabilities, notes, pinned, added_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO relationships (side_address, peer_address, nickname, introduced_by, capabilities, notes, pinned, added_at, peer_listen_addr)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(side_address, peer_address) DO UPDATE SET
                 nickname = excluded.nickname,
                 introduced_by = excluded.introduced_by,
                 capabilities = excluded.capabilities,
                 notes = excluded.notes,
-                pinned = excluded.pinned",
+                pinned = excluded.pinned,
+                peer_listen_addr = excluded.peer_listen_addr",
             params![
                 &side[..],
                 &r.address[..],
@@ -380,6 +395,7 @@ impl SideStore {
                 r.notes.as_deref(),
                 r.pinned as i64,
                 r.added_at as i64,
+                r.peer_listen_addr.as_deref(),
             ],
         )
         .map_err(map_sqlite)?;
@@ -400,7 +416,7 @@ impl SideStore {
         let conn = self.conn.lock().await;
         let mut stmt = conn
             .prepare(
-                "SELECT peer_address, nickname, introduced_by, capabilities, notes, pinned, added_at
+                "SELECT peer_address, nickname, introduced_by, capabilities, notes, pinned, added_at, peer_listen_addr
                  FROM relationships WHERE side_address = ?1",
             )
             .map_err(map_sqlite)?;
@@ -413,6 +429,7 @@ impl SideStore {
                 let notes: Option<String> = r.get(4)?;
                 let pinned: i64 = r.get(5)?;
                 let added_at: i64 = r.get(6)?;
+                let peer_listen_addr: Option<String> = r.get(7)?;
 
                 let mut address = [0u8; 32];
                 address.copy_from_slice(&peer_bytes);
@@ -429,6 +446,7 @@ impl SideStore {
                     notes,
                     pinned: pinned != 0,
                     added_at: added_at as u64,
+                    peer_listen_addr,
                 })
             })
             .map_err(map_sqlite)?;
@@ -704,6 +722,15 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 "#;
 
+/// v3 → v4 migration (Phase 3 Stage C): cache last-known network
+/// endpoint per saved friend so the chat-first UX can dial without
+/// re-prompting. NULL means "endpoint unknown" — UI prompts once.
+/// ALTER TABLE ADD COLUMN with no NOT NULL + no DEFAULT is safe on
+/// existing rows (they get NULL).
+const SCHEMA_V4_DELTA: &str = r#"
+ALTER TABLE relationships ADD COLUMN peer_listen_addr TEXT;
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -722,6 +749,7 @@ mod tests {
             notes: None,
             pinned: false,
             added_at: 1_700_000_000,
+            peer_listen_addr: None,
         }
     }
 
@@ -877,6 +905,117 @@ mod tests {
         // The migration runner short-circuits on existing schema_version row.
         let store2 = SideStore::open_memory().await.unwrap();
         assert!(store2.list_sides().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn relationship_with_listen_addr_round_trips() {
+        let store = SideStore::open_memory().await.unwrap();
+        store
+            .upsert_side(&StoredSide {
+                address: [0x11; 32],
+                seed: [0x22; 32],
+                label: None,
+                created_at: 1,
+                lifecycle: "Created".to_owned(),
+                last_send_at: None,
+                is_self_retired: false,
+            })
+            .await
+            .unwrap();
+        let mut r = rel(0x55, &["direct-message"]);
+        r.peer_listen_addr = Some("192.168.1.7:50101".to_owned());
+        store.upsert_relationship(&[0x11; 32], &r).await.unwrap();
+        let all = store.list_relationships(&[0x11; 32]).await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0], r);
+        // Overwrite the endpoint via re-upsert — UPDATE branch must copy.
+        let mut r2 = r.clone();
+        r2.peer_listen_addr = Some("203.0.113.10:443".to_owned());
+        store.upsert_relationship(&[0x11; 32], &r2).await.unwrap();
+        let again = store.list_relationships(&[0x11; 32]).await.unwrap();
+        assert_eq!(
+            again[0].peer_listen_addr.as_deref(),
+            Some("203.0.113.10:443")
+        );
+    }
+
+    #[tokio::test]
+    async fn v3_database_migrates_to_v4_preserves_relationships() {
+        // Build a v3-shaped database by hand (no peer_listen_addr column),
+        // insert a side + a relationship, then re-open via `SideStore::open`
+        // on the same path — the migration must add the new column without
+        // dropping the existing relationship row, and the row must come
+        // back with `peer_listen_addr = None`.
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("sides.db");
+
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_version (version INTEGER NOT NULL);
+                 INSERT INTO schema_version (version) VALUES (3);",
+            )
+            .unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.execute_batch(SCHEMA_V2_DELTA).unwrap();
+            conn.execute_batch(SCHEMA_V3_DELTA).unwrap();
+            conn.execute(
+                "INSERT INTO sides (address, seed, label, created_at, lifecycle, last_send_at, is_self_retired)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    &[0xAB_u8; 32][..],
+                    &[0xCD_u8; 32][..],
+                    Some("legacy"),
+                    1_700_000_000_i64,
+                    "Active",
+                    Option::<i64>::None,
+                    0_i64,
+                ],
+            )
+            .unwrap();
+            // v3 relationships row — no peer_listen_addr column yet.
+            conn.execute(
+                "INSERT INTO relationships (side_address, peer_address, nickname, introduced_by, capabilities, notes, pinned, added_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    &[0xAB_u8; 32][..],
+                    &[0x55_u8; 32][..],
+                    Some("legacy-friend"),
+                    Option::<&[u8]>::None,
+                    "direct-message",
+                    Option::<&str>::None,
+                    0_i64,
+                    1_700_000_100_i64,
+                ],
+            )
+            .unwrap();
+        }
+
+        let store = SideStore::open(tmp.path()).await.unwrap();
+
+        // Pre-existing v3 row survives + reads with peer_listen_addr = None.
+        let rels = store.list_relationships(&[0xAB; 32]).await.unwrap();
+        assert_eq!(rels.len(), 1);
+        assert_eq!(rels[0].address, [0x55; 32]);
+        assert_eq!(rels[0].nickname.as_deref(), Some("legacy-friend"));
+        assert!(rels[0].peer_listen_addr.is_none());
+
+        // New writes can populate the endpoint.
+        let mut r = rels[0].clone();
+        r.peer_listen_addr = Some("127.0.0.1:50050".to_owned());
+        store.upsert_relationship(&[0xAB; 32], &r).await.unwrap();
+        let after = store.list_relationships(&[0xAB; 32]).await.unwrap();
+        assert_eq!(
+            after[0].peer_listen_addr.as_deref(),
+            Some("127.0.0.1:50050")
+        );
+
+        // Schema version is now v4.
+        let conn = store.conn.lock().await;
+        let v: i64 = conn
+            .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
     }
 
     #[tokio::test]

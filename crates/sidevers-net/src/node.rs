@@ -591,6 +591,7 @@ impl Node {
                     notes: rec.notes,
                     pinned: rec.pinned,
                     added_at: rec.added_at,
+                    peer_listen_addr: None,
                 })
                 .await;
         }
