@@ -1,0 +1,16 @@
+{
+  "name": "Sidevers Brand Colors",
+  "description": "Six grays. Nothing else.",
+  "source": "Sidevers Project Document v.2, §7.3 Color",
+  "colors": {
+    "snow":         { "hex": "#FFFFFF", "rgb": [255,255,255], "role": "Pure light" },
+    "mist":         { "hex": "#F5F5F7", "rgb": [245,245,247], "role": "Soft surface — backgrounds, subtle separators" },
+    "silver-light": { "hex": "#D2D2D7", "rgb": [210,210,215], "role": "Border, divider, muted UI" },
+    "silver":       { "hex": "#86868B", "rgb": [134,134,139], "role": "Secondary text, captions" },
+    "ink":          { "hex": "#1D1D1F", "rgb": [29,29,31],    "role": "Primary text — foreground of the brand" },
+    "onyx":         { "hex": "#000000", "rgb": [0,0,0],       "role": "Mark container, high contrast" }
+  },
+  "primary": "ink",
+  "background": "snow",
+  "surface": "mist"
+}

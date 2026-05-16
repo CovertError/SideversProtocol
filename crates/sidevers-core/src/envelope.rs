@@ -47,6 +47,18 @@ impl MessageType {
     pub const DIRECT_MESSAGE: Self = Self(0x20);
     pub const DIRECT_RECEIPT: Self = Self(0x21);
     pub const DIRECT_TYPING: Self = Self(0x22);
+    // Side-level (§7) — Phase 1.5d extends the Direct range to carry
+    // profile fetch/deliver and side retirement records. These are
+    // side-to-side metadata; they reuse Direct intent and replay/freshness.
+    pub const PROFILE_FETCH: Self = Self(0x23);
+    pub const PROFILE_DELIVER: Self = Self(0x24);
+    pub const SIDE_RETIREMENT: Self = Self(0x25);
+    // Multi-device co-holder pairing (§7.5) — Phase 1.5f Track C.
+    pub const DEVICE_PAIRING_REQUEST: Self = Self(0x26);
+    pub const DEVICE_STATE_BUNDLE: Self = Self(0x27);
+    pub const DEVICE_REVOKE: Self = Self(0x28);
+    /// Phase 1.5g: live state delta pushed between co-holders (§7.5).
+    pub const STATE_DELTA: Self = Self(0x29);
 
     // Storage (§5) — Month 3
     pub const STORAGE_GET: Self = Self(0x30);

@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 500" width="400" height="500">
+  <!--
+    Sidevers Logo — Stacked Lockup
+    Mark on top (hero style with black rounded-square + silver mark),
+    wordmark below.
+  -->
+
+  <defs>
+    <linearGradient id="ms" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"  stop-color="#C5C5CA"/>
+      <stop offset="50%" stop-color="#86868B"/>
+      <stop offset="100%" stop-color="#5A5A5F"/>
+    </linearGradient>
+    <linearGradient id="mr" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%"  stop-color="#A8A8AD"/>
+      <stop offset="50%" stop-color="#6E6E73"/>
+      <stop offset="100%" stop-color="#3A3A3C"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Mark, 240x240 centered horizontally -->
+  <rect x="80" y="40" width="240" height="240" rx="48" ry="48" fill="#000000"/>
+  <g transform="translate(200 160)">
+    <circle cx="0" cy="0" r="80" fill="none" stroke="url(#mr)" stroke-width="5"/>
+    <g transform="rotate(-45)">
+      <ellipse cx="-32" cy="0" rx="42" ry="30" fill="none" stroke="url(#ms)" stroke-width="7" stroke-linecap="round"/>
+      <ellipse cx="32" cy="0" rx="42" ry="30" fill="none" stroke="url(#ms)" stroke-width="7" stroke-linecap="round"/>
+    </g>
+    <g transform="rotate(45)">
+      <ellipse cx="-32" cy="0" rx="42" ry="30" fill="none" stroke="url(#ms)" stroke-width="7" stroke-linecap="round"/>
+      <ellipse cx="32" cy="0" rx="42" ry="30" fill="none" stroke="url(#ms)" stroke-width="7" stroke-linecap="round"/>
+    </g>
+  </g>
+
+  <!-- Wordmark below -->
+  <text x="200" y="400"
+        font-family="Geist, 'Inter', 'Helvetica Neue', Arial, sans-serif"
+        font-size="80"
+        font-weight="500"
+        letter-spacing="-4"
+        text-anchor="middle"
+        fill="#1D1D1F">sidevers</text>
+</svg>

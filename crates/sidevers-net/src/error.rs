@@ -39,6 +39,9 @@ pub enum Error {
     #[error("storage: {0}")]
     Storage(#[from] sidevers_storage::Error),
 
+    #[error("sqlite: {0}")]
+    Sqlite(String),
+
     #[error("handshake declined by peer: {0}")]
     HandshakeDeclined(String),
 

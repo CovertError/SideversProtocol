@@ -23,3 +23,9 @@ pub use address::{Address, AddressKind};
 pub use envelope::{Envelope, MessageType, PROTOCOL_VERSION};
 pub use error::{Error, Result};
 pub use keys::{MasterKey, SideKey, SideLabel};
+pub use messages::device::{
+    DeltaOp, DeviceRevokePayload, PAIRING_NONCE_LEN, PairingQr, PairingRequestPayload,
+    RelationshipRecord, STATE_BUNDLE_AAD, StateBundleInner, StateBundlePayload, StateDeltaPayload,
+};
+pub use messages::profile::{ProfilePayload, capability};
+pub use messages::retirement::SideRetirementPayload;

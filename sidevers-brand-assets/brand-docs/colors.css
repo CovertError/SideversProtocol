@@ -1,0 +1,35 @@
+/* Sidevers Brand Colors
+   Six grays. Nothing else.
+   From the Sidevers Project Document v.2, §7.3 Color.
+*/
+
+:root {
+  --sv-snow:          #FFFFFF;  /* Pure light */
+  --sv-mist:          #F5F5F7;  /* Soft surface */
+  --sv-silver-light:  #D2D2D7;  /* Border, divider */
+  --sv-silver:        #86868B;  /* Secondary text */
+  --sv-ink:           #1D1D1F;  /* Primary text — foreground */
+  --sv-onyx:          #000000;  /* Mark container, high contrast */
+}
+
+/* Semantic aliases */
+:root {
+  --sv-background:    var(--sv-snow);
+  --sv-surface:       var(--sv-mist);
+  --sv-border:        var(--sv-silver-light);
+  --sv-text-muted:    var(--sv-silver);
+  --sv-text:          var(--sv-ink);
+  --sv-text-strong:   var(--sv-onyx);
+}
+
+/* Dark mode (inverts) */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --sv-background:  var(--sv-onyx);
+    --sv-surface:     #1D1D1F;
+    --sv-border:      #3A3A3C;
+    --sv-text-muted:  var(--sv-silver);
+    --sv-text:        var(--sv-mist);
+    --sv-text-strong: var(--sv-snow);
+  }
+}

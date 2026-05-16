@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+  <!--
+    Sidevers Mark v2 (matching the project document)
+    Two infinity symbols, each set on a diagonal (45° and 135°),
+    crossed through a single center point, inside a circular frame.
+    Each infinity contributes two lobes at opposite corners,
+    forming four interlocking loops total.
+  -->
+
+  <defs>
+    <!-- A single infinity, drawn horizontally, with two ellipse loops
+         that share a center crossing point at (100, 100).
+         Lobes extend left and right.
+         Inscribed inside a 130-unit-wide region centered at origin. -->
+    <g id="infinity">
+      <!-- Left lobe -->
+      <ellipse cx="74" cy="100" rx="34" ry="24"
+               fill="none" stroke="#FFFFFF" stroke-width="6"
+               stroke-linecap="round"/>
+      <!-- Right lobe -->
+      <ellipse cx="126" cy="100" rx="34" ry="24"
+               fill="none" stroke="#FFFFFF" stroke-width="6"
+               stroke-linecap="round"/>
+    </g>
+  </defs>
+
+  <!-- Outer circle frame -->
+  <circle cx="100" cy="100" r="94"
+          fill="none" stroke="#FFFFFF" stroke-width="3.5"/>
+
+  <!-- Infinity #1: rotated -45° (NE-SW diagonal) -->
+  <use href="#infinity" transform="rotate(-45 100 100)"/>
+
+  <!-- Infinity #2: rotated +45° (NW-SE diagonal) -->
+  <use href="#infinity" transform="rotate(45 100 100)"/>
+</svg>

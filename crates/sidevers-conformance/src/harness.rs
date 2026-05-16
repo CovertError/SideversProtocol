@@ -12,7 +12,10 @@ use sidevers_core::Address;
 use sidevers_core::keys::{MasterKey, SideKey};
 use sidevers_net::Node;
 #[cfg(test)]
-use sidevers_net::{Intent, fetch_object, send_dm};
+use sidevers_net::{
+    Intent, SideLifecycle, SideRelationship, announce_retirement, fetch_object, fetch_profile,
+    send_dm, set_jitter_disabled,
+};
 use tempfile::TempDir;
 
 pub struct TestNode {
@@ -1078,5 +1081,840 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         // (No assertion beyond "the call completed without erroring on the
         // wire" — the host's drop is silent by design.)
+    }
+
+    // =========================================================================
+    // Phase 1.5d — Profile (§7.3), capability enforcement (§7.7), retirement
+    // (§7.8).
+    // =========================================================================
+
+    use sidevers_core::ProfilePayload;
+    use sidevers_core::messages::profile::capability;
+    use std::collections::BTreeSet;
+
+    fn make_profile(side: &SideKey, caps: &[&str]) -> ProfilePayload {
+        let mut set = BTreeSet::new();
+        for c in caps {
+            set.insert((*c).to_owned());
+        }
+        ProfilePayload::sign(
+            side,
+            Some("Test User".to_owned()),
+            None,
+            Some("conformance fixture".to_owned()),
+            None,
+            None,
+            set,
+            42,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn profile_publish_and_fetch_round_trip() {
+        let alice = TestNode::spawn("work").await;
+        let bob = TestNode::spawn("close").await;
+        // Bob publishes a profile listing DIRECT_MESSAGE + STORAGE_HOST.
+        let bob_profile = make_profile(
+            &bob.local_side(),
+            &[capability::DIRECT_MESSAGE, capability::STORAGE_HOST],
+        );
+        bob.node.set_local_profile(bob_profile.clone()).await;
+
+        let session = alice
+            .node
+            .dial(bob.listen_addr(), Intent::Direct)
+            .await
+            .unwrap();
+        let fetched = fetch_profile(&session, alice.node.side(), bob.node.side().public_bytes())
+            .await
+            .unwrap();
+        assert_eq!(fetched, bob_profile);
+        assert!(fetched.has_capability(capability::STORAGE_HOST));
+    }
+
+    #[tokio::test]
+    async fn dm_dropped_when_recipient_lacks_direct_message_capability() {
+        let alice = TestNode::spawn("work").await;
+        let bob = TestNode::spawn("close").await;
+        // Bob publishes a profile that does NOT include direct-message.
+        let bob_profile = make_profile(&bob.local_side(), &[capability::STORAGE_HOST]);
+        bob.node.set_local_profile(bob_profile).await;
+
+        let session = alice
+            .node
+            .dial(bob.listen_addr(), Intent::Direct)
+            .await
+            .unwrap();
+        send_dm(&session, alice.node.side(), b"can you read me?")
+            .await
+            .unwrap();
+        drop(session);
+
+        // Wait up to 1s for the DM to be dropped silently. Use a short
+        // timeout, then poll for absence.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(800),
+            bob.node.next_direct_message(),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "expected DM to be silently dropped, but it was delivered"
+        );
+    }
+
+    #[tokio::test]
+    async fn dm_accepted_when_recipient_declares_capability() {
+        let alice = TestNode::spawn("work").await;
+        let bob = TestNode::spawn("close").await;
+        let bob_profile = make_profile(&bob.local_side(), &[capability::DIRECT_MESSAGE]);
+        bob.node.set_local_profile(bob_profile).await;
+
+        let session = alice
+            .node
+            .dial(bob.listen_addr(), Intent::Direct)
+            .await
+            .unwrap();
+        send_dm(&session, alice.node.side(), b"hi with capability")
+            .await
+            .unwrap();
+        drop(session);
+        let dm = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            bob.node.next_direct_message(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(&dm.plaintext, b"hi with capability");
+    }
+
+    #[tokio::test]
+    async fn dm_accepted_with_default_capabilities_when_no_profile_set() {
+        // No node sets a profile; the permissive default kicks in. This is
+        // the path the pre-existing 140 tests rely on.
+        let alice = TestNode::spawn("work").await;
+        let bob = TestNode::spawn("close").await;
+        assert!(bob.node.local_profile().await.is_none());
+
+        let session = alice
+            .node
+            .dial(bob.listen_addr(), Intent::Direct)
+            .await
+            .unwrap();
+        send_dm(&session, alice.node.side(), b"no profile, still works")
+            .await
+            .unwrap();
+        drop(session);
+        let dm = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            bob.node.next_direct_message(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(&dm.plaintext, b"no profile, still works");
+    }
+
+    #[tokio::test]
+    async fn retirement_record_marks_side_retired_on_recipient() {
+        let alice = TestNode::spawn("work").await;
+        let bob = TestNode::spawn("close").await;
+        // Bob has direct-message capability so the DM/retirement gets through.
+        let bob_profile = make_profile(&bob.local_side(), &[capability::DIRECT_MESSAGE]);
+        bob.node.set_local_profile(bob_profile).await;
+
+        let session = alice
+            .node
+            .dial(bob.listen_addr(), Intent::Direct)
+            .await
+            .unwrap();
+        let record = alice
+            .node
+            .publish_retirement(Some("test retirement".to_owned()))
+            .await
+            .unwrap();
+        announce_retirement(&session, alice.node.side(), &record)
+            .await
+            .unwrap();
+        drop(session);
+
+        // Give bob a moment to process the inbound retirement record.
+        for _ in 0..40 {
+            if bob
+                .node
+                .is_side_retired(&alice.node.side().public_bytes())
+                .await
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("bob did not mark alice's side as retired");
+    }
+
+    #[tokio::test]
+    async fn retired_side_subsequent_dm_still_delivers_with_warning() {
+        // Per §7.8 the keys still work; we warn but do not drop. Verify
+        // the DM still arrives after the retirement record has been
+        // observed.
+        let alice = TestNode::spawn("work").await;
+        let bob = TestNode::spawn("close").await;
+        bob.node
+            .set_local_profile(make_profile(
+                &bob.local_side(),
+                &[capability::DIRECT_MESSAGE],
+            ))
+            .await;
+
+        // 1. alice announces retirement to bob.
+        let session = alice
+            .node
+            .dial(bob.listen_addr(), Intent::Direct)
+            .await
+            .unwrap();
+        let record = alice.node.publish_retirement(None).await.unwrap();
+        announce_retirement(&session, alice.node.side(), &record)
+            .await
+            .unwrap();
+        drop(session);
+
+        // Wait for the retirement bit to flip.
+        for _ in 0..40 {
+            if bob
+                .node
+                .is_side_retired(&alice.node.side().public_bytes())
+                .await
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(
+            bob.node
+                .is_side_retired(&alice.node.side().public_bytes())
+                .await
+        );
+
+        // 2. alice (still using the same keys) sends a DM. It should be
+        // delivered, with the warning logged but the envelope accepted.
+        let session2 = alice
+            .node
+            .dial(bob.listen_addr(), Intent::Direct)
+            .await
+            .unwrap();
+        send_dm(&session2, alice.node.side(), b"after retirement")
+            .await
+            .unwrap();
+        drop(session2);
+        let dm = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            bob.node.next_direct_message(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(&dm.plaintext, b"after retirement");
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 1.5e — Side relationships (§7.4), lifecycle (§7.8), hygiene
+    // jitter (§7.6).
+    // -------------------------------------------------------------------
+
+    use std::sync::Once;
+
+    static JITTER_OFF: Once = Once::new();
+
+    fn disable_jitter_once() {
+        JITTER_OFF.call_once(|| {
+            set_jitter_disabled(true);
+        });
+    }
+
+    fn make_relationship(addr: [u8; 32], caps: &[&str]) -> SideRelationship {
+        let mut set = BTreeSet::new();
+        for c in caps {
+            set.insert((*c).to_owned());
+        }
+        SideRelationship {
+            address: addr,
+            nickname: Some("contact".to_owned()),
+            introduced_by: None,
+            capabilities: set,
+            notes: None,
+            pinned: false,
+            added_at: 1_700_000_000,
+        }
+    }
+
+    #[tokio::test]
+    async fn relationship_round_trip_crud() {
+        disable_jitter_once();
+        let alice = TestNode::spawn("work").await;
+        let bob_addr = [0xBB; 32];
+        // Insert.
+        alice
+            .node
+            .add_relationship(make_relationship(bob_addr, &[capability::DIRECT_MESSAGE]))
+            .await;
+        let got = alice.node.get_relationship(&bob_addr).await.unwrap();
+        assert!(got.capabilities.contains(capability::DIRECT_MESSAGE));
+        // List.
+        let all = alice.node.list_relationships().await;
+        assert_eq!(all.len(), 1);
+        // Update.
+        let before = alice
+            .node
+            .update_relationship(&bob_addr, |r| {
+                r.nickname = Some("bob".to_owned());
+                r.pinned = true;
+            })
+            .await
+            .unwrap();
+        assert_eq!(before.nickname.as_deref(), Some("contact"));
+        let after = alice.node.get_relationship(&bob_addr).await.unwrap();
+        assert_eq!(after.nickname.as_deref(), Some("bob"));
+        assert!(after.pinned);
+        // Remove.
+        alice.node.remove_relationship(&bob_addr).await;
+        assert!(alice.node.get_relationship(&bob_addr).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn dm_accepted_via_relationship_capability_even_without_profile() {
+        disable_jitter_once();
+        // Bob has no profile (so tier-3 = permissive default) AND Bob
+        // adds a relationship for Alice listing direct-message. The
+        // relationship is consulted first; its capability set decides.
+        let alice = TestNode::spawn("work").await;
+        let bob = TestNode::spawn("close").await;
+        assert!(bob.node.local_profile().await.is_none());
+        bob.node
+            .add_relationship(make_relationship(
+                alice.node.side().public_bytes(),
+                &[capability::DIRECT_MESSAGE],
+            ))
+            .await;
+        let session = alice
+            .node
+            .dial(bob.listen_addr(), Intent::Direct)
+            .await
+            .unwrap();
+        send_dm(&session, alice.node.side(), b"via relationship")
+            .await
+            .unwrap();
+        drop(session);
+        let dm = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            bob.node.next_direct_message(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(&dm.plaintext, b"via relationship");
+    }
+
+    #[tokio::test]
+    async fn dm_dropped_when_relationship_revokes_direct_message() {
+        disable_jitter_once();
+        // Bob's profile grants direct-message globally (tier-2 would
+        // accept). But Bob's relationship for Alice has empty
+        // capabilities — explicit block. Relationship wins (tier-1).
+        let alice = TestNode::spawn("work").await;
+        let bob = TestNode::spawn("close").await;
+        let bob_profile = make_profile(&bob.local_side(), &[capability::DIRECT_MESSAGE]);
+        bob.node.set_local_profile(bob_profile).await;
+        bob.node
+            .add_relationship(make_relationship(
+                alice.node.side().public_bytes(),
+                &[], // empty = block
+            ))
+            .await;
+        let session = alice
+            .node
+            .dial(bob.listen_addr(), Intent::Direct)
+            .await
+            .unwrap();
+        send_dm(&session, alice.node.side(), b"blocked")
+            .await
+            .unwrap();
+        drop(session);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(800),
+            bob.node.next_direct_message(),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "expected DM dropped by relationship block, got delivered"
+        );
+    }
+
+    #[tokio::test]
+    async fn dm_accepted_when_relationship_grants_and_profile_denies() {
+        disable_jitter_once();
+        // Bob's profile has capabilities = {} (deny-all generally), but
+        // Bob's relationship for Alice grants direct-message. Tier-1
+        // (relationship) wins.
+        let alice = TestNode::spawn("work").await;
+        let bob = TestNode::spawn("close").await;
+        // No direct-message in the profile.
+        let bob_profile = make_profile(&bob.local_side(), &[capability::STORAGE_HOST]);
+        bob.node.set_local_profile(bob_profile).await;
+        bob.node
+            .add_relationship(make_relationship(
+                alice.node.side().public_bytes(),
+                &[capability::DIRECT_MESSAGE],
+            ))
+            .await;
+        let session = alice
+            .node
+            .dial(bob.listen_addr(), Intent::Direct)
+            .await
+            .unwrap();
+        send_dm(&session, alice.node.side(), b"override allow")
+            .await
+            .unwrap();
+        drop(session);
+        let dm = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            bob.node.next_direct_message(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(&dm.plaintext, b"override allow");
+    }
+
+    #[tokio::test]
+    async fn lifecycle_starts_created() {
+        disable_jitter_once();
+        let alice = TestNode::spawn("work").await;
+        assert_eq!(alice.node.lifecycle().await, SideLifecycle::Created);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_becomes_active_after_first_send() {
+        disable_jitter_once();
+        let alice = TestNode::spawn("work").await;
+        let bob = TestNode::spawn("close").await;
+        // Use the Node wrapper (which touches lifecycle); the free
+        // function does NOT touch lifecycle by design.
+        let session = alice
+            .node
+            .dial(bob.listen_addr(), Intent::Direct)
+            .await
+            .unwrap();
+        alice.node.send_dm(&session, b"first send").await.unwrap();
+        assert_eq!(alice.node.lifecycle().await, SideLifecycle::Active);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_becomes_retired_after_publish_retirement() {
+        disable_jitter_once();
+        let alice = TestNode::spawn("work").await;
+        let _record = alice.node.publish_retirement(None).await.unwrap();
+        assert_eq!(alice.node.lifecycle().await, SideLifecycle::Retired);
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 1.5f Track B — Multi-side hosting (§7.2 + §7.6).
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn node_hosts_two_sides_with_distinct_endpoints() {
+        disable_jitter_once();
+        let alice = TestNode::spawn("work").await;
+        let master = MasterKey::generate().unwrap();
+        let private_side = master.derive_side(&"private".into()).unwrap();
+        let private_addr = private_side.public_bytes();
+        let (side_p, p_listen) = alice
+            .node
+            .add_side(private_side, SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .await
+            .unwrap();
+        assert_eq!(side_p.address, private_addr);
+        assert_ne!(p_listen, alice.listen_addr());
+        let queried = alice.node.side_listen_addr(&private_addr).await.unwrap();
+        assert_eq!(queried, p_listen);
+        let all = alice.node.sides().await;
+        assert_eq!(all.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn cross_side_dm_routing_is_correct() {
+        // alice hosts side W (primary) + side P. bob sends a DM to side
+        // P only; the DM arrives tagged with envelope.to = side_p.address.
+        // The DM channel is shared, but envelope.to disambiguates.
+        disable_jitter_once();
+        let alice = TestNode::spawn("work").await;
+        let bob = TestNode::spawn("bob").await;
+        let master = MasterKey::generate().unwrap();
+        let private_side = master.derive_side(&"private".into()).unwrap();
+        let private_seed = private_side.to_seed();
+        let private_addr = private_side.public_bytes();
+        let (_side_p, p_listen) = alice
+            .node
+            .add_side(private_side, SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .await
+            .unwrap();
+
+        let session = bob.node.dial(p_listen, Intent::Direct).await.unwrap();
+        send_dm(&session, bob.node.side(), b"hi private side")
+            .await
+            .unwrap();
+        drop(session);
+
+        let dm = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            alice.node.next_direct_message(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(&dm.plaintext, b"hi private side");
+        // envelope.to = the receiving side's pubkey (private), not the
+        // primary work side. This confirms routing landed on the right
+        // endpoint.
+        assert_eq!(dm.envelope.to, Some(private_addr));
+        // The handshake's recipient was the private side's keypair.
+        let _ = private_seed;
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 1.5f Track C — Multi-device pairing (§7.5).
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn device_pairing_completes_and_new_device_hosts_the_side() {
+        disable_jitter_once();
+        let existing = TestNode::spawn("work").await;
+        let new_device = TestNode::spawn("new-device").await;
+
+        // existing sets a profile + a relationship on its primary side.
+        let work_profile = make_profile(&existing.local_side(), &[capability::DIRECT_MESSAGE]);
+        existing.node.set_local_profile(work_profile.clone()).await;
+        existing
+            .node
+            .add_relationship(make_relationship([0xAA; 32], &[capability::DIRECT_MESSAGE]))
+            .await;
+
+        // existing generates a QR for its primary side.
+        let work_addr = existing.node.side().public_bytes();
+        let qr = existing.node.generate_pairing_qr(&work_addr).await.unwrap();
+        assert_eq!(qr.side, work_addr);
+
+        // Round-trip the QR string through encode/parse to exercise the
+        // codec path the real new device would go through.
+        let qr_str = qr.encode();
+        let parsed_qr = sidevers_core::PairingQr::parse(&qr_str).unwrap();
+
+        // new device accepts the pairing.
+        let (joined_side, _listen) = new_device.node.accept_pairing(parsed_qr).await.unwrap();
+        assert_eq!(joined_side.address, work_addr);
+
+        // The new device should now host the joined side (in addition to
+        // its own original side).
+        let hosted = new_device.node.sides().await;
+        assert_eq!(hosted.len(), 2);
+        assert!(hosted.iter().any(|s| s.address == work_addr));
+
+        // Bundle replayed: profile + relationship visible on the new
+        // device's joined side.
+        let restored_profile = joined_side.profile().await.unwrap();
+        assert_eq!(
+            restored_profile.to_wire_bytes(),
+            work_profile.to_wire_bytes()
+        );
+        let restored_rel = joined_side.get_relationship(&[0xAA; 32]).await.unwrap();
+        assert!(
+            restored_rel
+                .capabilities
+                .contains(capability::DIRECT_MESSAGE)
+        );
+
+        // existing now lists new_device's pubkey as a co-holder.
+        let coh = existing.node.list_co_holders(&work_addr).await;
+        assert_eq!(coh.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn pairing_with_stale_nonce_is_rejected() {
+        // Send a PAIRING_REQUEST referencing a nonce the existing device
+        // never minted; serve_direct silently drops, so accept_pairing's
+        // bundle wait times out.
+        disable_jitter_once();
+        let existing = TestNode::spawn("work").await;
+        let new_device = TestNode::spawn("new-device").await;
+
+        let work_addr = existing.node.side().public_bytes();
+        let listen = existing.node.side_listen_addr(&work_addr).await.unwrap();
+        let bogus_qr = sidevers_core::PairingQr {
+            side: work_addr,
+            nonce: [0x77; 16],
+            dial_addr: listen.to_string(),
+        };
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(12),
+            new_device.node.accept_pairing(bogus_qr),
+        )
+        .await;
+        // Either the inner 10s bundle wait times out → Err, or the outer
+        // 12s wraps to Err. Both are acceptable failure modes.
+        match result {
+            Ok(Err(_)) => {} // accept_pairing internally failed (bundle timeout)
+            Err(_) => {}     // outer timeout
+            Ok(Ok(_)) => panic!("pairing should have been rejected"),
+        }
+    }
+
+    #[tokio::test]
+    async fn device_revoke_marks_revoked_locally() {
+        disable_jitter_once();
+        let existing = TestNode::spawn("work").await;
+        let new_device = TestNode::spawn("new-device").await;
+
+        let work_addr = existing.node.side().public_bytes();
+        let qr = existing.node.generate_pairing_qr(&work_addr).await.unwrap();
+        let (_joined, _) = new_device.node.accept_pairing(qr).await.unwrap();
+
+        // existing identifies the new device's pubkey from its co_holders.
+        let coh = existing.node.list_co_holders(&work_addr).await;
+        let new_dev_pubkey = coh[0];
+
+        // existing revokes.
+        let _record = existing
+            .node
+            .revoke_co_holder(&work_addr, new_dev_pubkey, Some("test".into()))
+            .await
+            .unwrap();
+        assert!(
+            existing
+                .node
+                .is_device_revoked(&work_addr, &new_dev_pubkey)
+                .await
+        );
+        // The revoked device is removed from existing's co-holder list.
+        assert!(existing.node.list_co_holders(&work_addr).await.is_empty());
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 1.5g — Live state delta sync between co-holders.
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn pairing_closes_the_loop_existing_knows_new_dial_addr() {
+        disable_jitter_once();
+        let existing = TestNode::spawn("work").await;
+        let new_device = TestNode::spawn("new-device").await;
+
+        let work_addr = existing.node.side().public_bytes();
+        let qr = existing.node.generate_pairing_qr(&work_addr).await.unwrap();
+        let (_joined_side, new_listen) = new_device.node.accept_pairing(qr).await.unwrap();
+        let existing_side = existing.node.side_by_address(&work_addr).await.unwrap();
+
+        // Poll: existing's side W should record SOME co-holder addr
+        // matching the new device's listen address.
+        let target = new_listen.to_string();
+        for _ in 0..80 {
+            let addrs = existing_side.list_co_holder_addrs().await;
+            if addrs.iter().any(|(_, a)| a == &target) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let addrs = existing_side.list_co_holder_addrs().await;
+        panic!(
+            "loop never closed: existing's co_holder_addrs = {:?}, expected addr {target}",
+            addrs
+        );
+    }
+
+    #[tokio::test]
+    async fn live_sync_propagates_relationship_add() {
+        disable_jitter_once();
+        let existing = TestNode::spawn("work").await;
+        let new_device = TestNode::spawn("new-device").await;
+
+        let work_addr = existing.node.side().public_bytes();
+        let qr = existing.node.generate_pairing_qr(&work_addr).await.unwrap();
+        let (joined_side, _) = new_device.node.accept_pairing(qr).await.unwrap();
+
+        // Wait for the CoHolderAdded loop-closer to land on existing.
+        let existing_side = existing.node.side_by_address(&work_addr).await.unwrap();
+        wait_for(|| async { !existing_side.list_co_holder_addrs().await.is_empty() }).await;
+
+        // After pairing: existing adds a relationship. The auto-push
+        // hook should propagate it to the new device.
+        existing
+            .node
+            .add_relationship(make_relationship([0xDD; 32], &[capability::DIRECT_MESSAGE]))
+            .await;
+
+        wait_for(|| async { joined_side.get_relationship(&[0xDD; 32]).await.is_some() }).await;
+        let r = joined_side.get_relationship(&[0xDD; 32]).await.unwrap();
+        assert!(r.capabilities.contains(capability::DIRECT_MESSAGE));
+    }
+
+    #[tokio::test]
+    async fn live_sync_propagates_profile_update() {
+        disable_jitter_once();
+        let existing = TestNode::spawn("work").await;
+        let new_device = TestNode::spawn("new-device").await;
+
+        let work_addr = existing.node.side().public_bytes();
+        let qr = existing.node.generate_pairing_qr(&work_addr).await.unwrap();
+        let (joined_side, _) = new_device.node.accept_pairing(qr).await.unwrap();
+
+        let existing_side = existing.node.side_by_address(&work_addr).await.unwrap();
+        wait_for(|| async { !existing_side.list_co_holder_addrs().await.is_empty() }).await;
+
+        // Build a new profile with strictly newer updated_at than any
+        // existing one, then push it via Node::set_local_profile.
+        let updated_profile = ProfilePayload::sign(
+            &existing.local_side(),
+            Some("Renamed".to_owned()),
+            None,
+            Some("updated bio".to_owned()),
+            None,
+            None,
+            BTreeSet::from([capability::DIRECT_MESSAGE.to_owned()]),
+            2_000_000_000,
+        )
+        .unwrap();
+        existing
+            .node
+            .set_local_profile(updated_profile.clone())
+            .await;
+
+        wait_for(|| async {
+            joined_side
+                .profile()
+                .await
+                .map(|p| p.bio.as_deref() == Some("updated bio"))
+                .unwrap_or(false)
+        })
+        .await;
+        let p = joined_side.profile().await.unwrap();
+        assert_eq!(p.bio.as_deref(), Some("updated bio"));
+        assert_eq!(p.name.as_deref(), Some("Renamed"));
+    }
+
+    /// Poll up to 4 seconds for `pred` to return true. Used by Phase
+    /// 1.5g sync tests where push is fire-and-forget on the network.
+    async fn wait_for<F, Fut>(mut pred: F)
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        for _ in 0..80 {
+            if pred().await {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("wait_for: predicate never became true within 4s");
+    }
+
+    #[tokio::test]
+    async fn side_state_persists_across_node_restart() {
+        // Phase 1.5f Track A: state set on the first Node instance must
+        // be visible to a second Node started with the same side seed +
+        // data_dir.
+        disable_jitter_once();
+        let tmp = tempfile::tempdir().unwrap();
+        let master = MasterKey::generate().unwrap();
+        let seed = master.derive_side(&"work".into()).unwrap().to_seed();
+
+        // First instance: install a profile + relationship, mark a side
+        // as retired-seen, then shut down.
+        let side1 = SideKey::from_seed(&seed, "(test)");
+        let node1 = Node::start(
+            side1,
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            tmp.path(),
+        )
+        .await
+        .unwrap();
+
+        let profile = make_profile(
+            &SideKey::from_seed(&seed, "(test)"),
+            &[capability::DIRECT_MESSAGE, capability::STORAGE_HOST],
+        );
+        node1.set_local_profile(profile.clone()).await;
+        node1
+            .add_relationship(make_relationship([0xCC; 32], &[capability::DIRECT_MESSAGE]))
+            .await;
+
+        node1.shutdown().await;
+
+        // Second instance: same side, same data_dir. State should be
+        // restored from SQLite.
+        let side2 = SideKey::from_seed(&seed, "(test)");
+        let node2 = Node::start(
+            side2,
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            tmp.path(),
+        )
+        .await
+        .unwrap();
+        let restored_profile = node2.local_profile().await.unwrap();
+        assert_eq!(restored_profile.to_wire_bytes(), profile.to_wire_bytes());
+        let restored_rel = node2.get_relationship(&[0xCC; 32]).await.unwrap();
+        assert!(
+            restored_rel
+                .capabilities
+                .contains(capability::DIRECT_MESSAGE)
+        );
+        node2.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn lifecycle_set_manually_then_refresh_respects_retired_stickiness() {
+        disable_jitter_once();
+        let alice = TestNode::spawn("work").await;
+        // Manually pin to Retired.
+        alice.node.set_lifecycle(SideLifecycle::Retired).await;
+        // refresh_lifecycle is a no-op on Retired.
+        alice.node.refresh_lifecycle().await;
+        assert_eq!(alice.node.lifecycle().await, SideLifecycle::Retired);
+        // Re-pin to Dormant.
+        alice.node.set_lifecycle(SideLifecycle::Dormant).await;
+        assert_eq!(alice.node.lifecycle().await, SideLifecycle::Dormant);
+    }
+
+    #[tokio::test]
+    async fn profile_fetch_returns_nothing_when_target_isnt_hosted_side() {
+        // Bob hosts profile X; alice asks for profile Y (a different
+        // pubkey). Bob's serve_direct silently drops, so fetch_profile
+        // times out / errors at the network layer.
+        let alice = TestNode::spawn("work").await;
+        let bob = TestNode::spawn("close").await;
+        bob.node
+            .set_local_profile(make_profile(
+                &bob.local_side(),
+                &[capability::DIRECT_MESSAGE],
+            ))
+            .await;
+
+        let session = alice
+            .node
+            .dial(bob.listen_addr(), Intent::Direct)
+            .await
+            .unwrap();
+        // Ask for an arbitrary pubkey that isn't bob's hosted side.
+        let unrelated = [0x77u8; 32];
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(800),
+            fetch_profile(&session, alice.node.side(), unrelated),
+        )
+        .await;
+        assert!(
+            result.is_err() || result.unwrap().is_err(),
+            "expected fetch to time out or error; got Ok"
+        );
     }
 }

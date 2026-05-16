@@ -1529,6 +1529,7 @@ dependencies = [
  "quinn",
  "rand 0.8.6",
  "rcgen",
+ "rusqlite",
  "rustls",
  "rustls-pki-types",
  "sha2",

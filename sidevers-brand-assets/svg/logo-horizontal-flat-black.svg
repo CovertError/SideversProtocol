@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 200" width="800" height="200">
+  <!--
+    Sidevers Logo — Horizontal Flat
+    Single-color version: flat mark (no rounded-square container, no gradient)
+    + wordmark, both in #000000.
+    For: small sizes, monochrome contexts, embroidery, single-color print.
+  -->
+
+  <!-- Flat mark, 160×160 centered on its own area -->
+  <g transform="translate(100 100)">
+    <circle cx="0" cy="0" r="76" fill="none" stroke="#000000" stroke-width="3"/>
+    <g transform="rotate(-45)">
+      <ellipse cx="-28" cy="0" rx="38" ry="27" fill="none" stroke="#000000" stroke-width="5" stroke-linecap="round"/>
+      <ellipse cx="28" cy="0" rx="38" ry="27" fill="none" stroke="#000000" stroke-width="5" stroke-linecap="round"/>
+    </g>
+    <g transform="rotate(45)">
+      <ellipse cx="-28" cy="0" rx="38" ry="27" fill="none" stroke="#000000" stroke-width="5" stroke-linecap="round"/>
+      <ellipse cx="28" cy="0" rx="38" ry="27" fill="none" stroke="#000000" stroke-width="5" stroke-linecap="round"/>
+    </g>
+  </g>
+
+  <!-- Wordmark -->
+  <text x="220" y="135"
+        font-family="Geist, 'Inter', 'Helvetica Neue', Arial, sans-serif"
+        font-size="110"
+        font-weight="500"
+        letter-spacing="-5.5"
+        fill="#000000">sidevers</text>
+</svg>

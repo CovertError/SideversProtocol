@@ -9,9 +9,12 @@
 //! Payloads are encoded as CBOR maps in canonical key order (§3.1) and then
 //! wrapped (and, for unicast, encrypted) inside an `Envelope` (see `envelope.rs`).
 
+pub mod device;
 pub mod direct;
 pub mod forward;
 pub mod handshake;
 pub mod peer;
+pub mod profile;
 pub mod rendezvous;
+pub mod retirement;
 pub mod verse;

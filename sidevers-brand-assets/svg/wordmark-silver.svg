@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 140" width="600" height="140">
+  <!--
+    Sidevers Wordmark
+    Lowercase "sidevers" set in Geist Medium (or geometric sans-serif fallback).
+    Tracking -0.05em (-5 units at 100px).
+    Color: #86868B.
+    Per the Sidevers Project Document v.2 §7.5.
+  -->
+  <text x="300" y="100"
+        font-family="Geist, 'Inter', 'Helvetica Neue', Arial, sans-serif"
+        font-size="100"
+        font-weight="500"
+        letter-spacing="-5"
+        text-anchor="middle"
+        fill="#86868B">sidevers</text>
+</svg>

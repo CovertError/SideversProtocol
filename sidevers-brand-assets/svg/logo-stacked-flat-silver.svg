@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 500" width="400" height="500">
+  <!--
+    Sidevers Logo — Stacked Flat
+    Single-color flat version.
+  -->
+
+  <!-- Flat mark -->
+  <g transform="translate(200 160)">
+    <circle cx="0" cy="0" r="110" fill="none" stroke="#86868B" stroke-width="4"/>
+    <g transform="rotate(-45)">
+      <ellipse cx="-44" cy="0" rx="56" ry="40" fill="none" stroke="#86868B" stroke-width="8" stroke-linecap="round"/>
+      <ellipse cx="44" cy="0" rx="56" ry="40" fill="none" stroke="#86868B" stroke-width="8" stroke-linecap="round"/>
+    </g>
+    <g transform="rotate(45)">
+      <ellipse cx="-44" cy="0" rx="56" ry="40" fill="none" stroke="#86868B" stroke-width="8" stroke-linecap="round"/>
+      <ellipse cx="44" cy="0" rx="56" ry="40" fill="none" stroke="#86868B" stroke-width="8" stroke-linecap="round"/>
+    </g>
+  </g>
+
+  <!-- Wordmark -->
+  <text x="200" y="400"
+        font-family="Geist, 'Inter', 'Helvetica Neue', Arial, sans-serif"
+        font-size="80"
+        font-weight="500"
+        letter-spacing="-4"
+        text-anchor="middle"
+        fill="#86868B">sidevers</text>
+</svg>

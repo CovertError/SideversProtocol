@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!--
+    Sidevers Hero / App Icon
+    Silver mark on rounded-square black container, matching the cover of
+    the Sidevers Project Document v.2.
+
+    Use this for: app icons (iOS, Android), splash screens, hero presentations,
+    cover pages, recruiting decks.
+
+    For flat / small-size / monochrome contexts use mark.svg or mark-{color}.svg.
+  -->
+
+  <defs>
+    <!-- Subtle gradient on the silver, suggesting chiseled metal -->
+    <linearGradient id="silver" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"  stop-color="#C5C5CA"/>
+      <stop offset="50%" stop-color="#86868B"/>
+      <stop offset="100%" stop-color="#5A5A5F"/>
+    </linearGradient>
+
+    <linearGradient id="silver-ring" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%"  stop-color="#A8A8AD"/>
+      <stop offset="50%" stop-color="#6E6E73"/>
+      <stop offset="100%" stop-color="#3A3A3C"/>
+    </linearGradient>
+
+    <!-- Single infinity (two lobes) for reuse on both diagonals -->
+    <g id="infinity-hero">
+      <ellipse cx="190" cy="256" rx="86" ry="62"
+               fill="none" stroke="url(#silver)" stroke-width="14"
+               stroke-linecap="round"/>
+      <ellipse cx="322" cy="256" rx="86" ry="62"
+               fill="none" stroke="url(#silver)" stroke-width="14"
+               stroke-linecap="round"/>
+    </g>
+  </defs>
+
+  <!-- Rounded-square black container -->
+  <rect x="0" y="0" width="512" height="512" rx="100" ry="100" fill="#000000"/>
+
+  <!-- Outer silver ring inside the container -->
+  <circle cx="256" cy="256" r="170" fill="none"
+          stroke="url(#silver-ring)" stroke-width="10"/>
+
+  <!-- First infinity: -45° -->
+  <use href="#infinity-hero" transform="rotate(-45 256 256)"/>
+
+  <!-- Second infinity: +45° -->
+  <use href="#infinity-hero" transform="rotate(45 256 256)"/>
+</svg>
