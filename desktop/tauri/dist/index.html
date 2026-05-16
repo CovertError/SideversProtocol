@@ -6,12 +6,8 @@
     <title>Sidevers</title>
     <link rel="icon" type="image/png" href="logo.png" />
     <!--
-      Phase 3.J: Geist + Geist Mono are loaded LOCALLY via @font-face in
-      style.css. The font files must be placed under `dist/fonts/`
-      before bundling — see `dist/fonts/README.md` for instructions.
-      If absent, the CSS font-family chain falls back to system
-      sans-serif so the app still renders. Loading via CDN would
-      violate the production CSP and break offline use.
+      Phase 3.J: Geist + Geist Mono load locally via @font-face in style.css.
+      Font files live under dist/fonts/ — see dist/fonts/README.md.
     -->
     <link rel="stylesheet" href="brand-colors.css" />
     <link rel="stylesheet" href="style.css" />
@@ -141,232 +137,335 @@
       </div>
     </div>
 
-    <header class="topbar">
-      <img src="logo.png" alt="Sidevers" class="logo" />
-      <div class="topbar-right">
-        <select id="lang-switch" class="lang-switch" aria-label="Language">
-          <option value="en">English</option>
-          <option value="ar">العربية</option>
-        </select>
-        <div class="status" id="status">
-          <span class="dot dot-idle" id="status-dot"></span>
-          <span id="status-text" data-i18n="status.idle">No node started</span>
+    <!--
+      Stage B shell — sidebar + main pane. The topbar holds the status +
+      language switch. The sidebar holds the nav (six sections). The main
+      pane holds the six section panes, only one visible at a time.
+
+      Each section pane wraps the existing card markup verbatim from
+      Stage A so behavior is unchanged. Stage C rewrites the card markup
+      itself with Tailwind utilities, section by section.
+    -->
+    <div id="app-shell" class="sv-shell">
+      <header class="topbar">
+        <img src="logo.png" alt="Sidevers" class="logo" />
+        <div class="topbar-right">
+          <select id="lang-switch" class="lang-switch" aria-label="Language">
+            <option value="en">English</option>
+            <option value="ar">العربية</option>
+          </select>
+          <div class="status" id="status">
+            <span class="dot dot-idle" id="status-dot"></span>
+            <span id="status-text" data-i18n="status.idle">No node started</span>
+          </div>
         </div>
+      </header>
+
+      <div class="sv-shell-row">
+        <aside class="sv-sidebar">
+          <div class="sv-sidebar-brand">
+            <img src="logo.png" alt="" />
+            <span>Sidevers</span>
+          </div>
+          <nav data-i18n-aria-label="nav.aria" aria-label="Primary navigation">
+            <ul class="sv-nav">
+              <li>
+                <button class="sv-nav-btn" data-nav="inbox" data-active="true">
+                  <!-- inbox icon -->
+                  <svg viewBox="0 0 24 24" stroke-width="1.6" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 13.5h3.86a2.25 2.25 0 0 1 2.012 1.244l.256.512a2.25 2.25 0 0 0 2.013 1.244h3.218a2.25 2.25 0 0 0 2.013-1.244l.256-.512a2.25 2.25 0 0 1 2.013-1.244h3.859m-19.5.338V18a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18v-4.162c0-.224-.034-.447-.1-.661L19.24 5.338a2.25 2.25 0 0 0-2.15-1.588H6.911a2.25 2.25 0 0 0-2.15 1.588L2.35 13.177a2.25 2.25 0 0 0-.1.661Z" />
+                  </svg>
+                  <span data-i18n="nav.inbox">Inbox</span>
+                </button>
+              </li>
+              <li>
+                <button class="sv-nav-btn" data-nav="sides">
+                  <!-- users icon -->
+                  <svg viewBox="0 0 24 24" stroke-width="1.6" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M15 19.128a9.38 9.38 0 0 0 2.625.372 9.337 9.337 0 0 0 4.121-.952 4.125 4.125 0 0 0-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 0 1 8.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0 1 11.964-3.07M12 6.375a3.375 3.375 0 1 1-6.75 0 3.375 3.375 0 0 1 6.75 0Zm8.25 2.25a2.625 2.625 0 1 1-5.25 0 2.625 2.625 0 0 1 5.25 0Z" />
+                  </svg>
+                  <span data-i18n="nav.sides">Sides</span>
+                </button>
+              </li>
+              <li>
+                <button class="sv-nav-btn" data-nav="send">
+                  <!-- paper-airplane icon -->
+                  <svg viewBox="0 0 24 24" stroke-width="1.6" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M6 12 3.269 3.125A59.769 59.769 0 0 1 21.485 12 59.768 59.768 0 0 1 3.27 20.875L5.999 12Zm0 0h7.5" />
+                  </svg>
+                  <span data-i18n="nav.send">Send</span>
+                </button>
+              </li>
+              <li>
+                <button class="sv-nav-btn" data-nav="contacts">
+                  <!-- identification icon -->
+                  <svg viewBox="0 0 24 24" stroke-width="1.6" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M15 9h3.75M15 12h3.75M15 15h3.75M4.5 19.5h15a2.25 2.25 0 0 0 2.25-2.25V6.75a2.25 2.25 0 0 0-2.25-2.25h-15a2.25 2.25 0 0 0-2.25 2.25v10.5a2.25 2.25 0 0 0 2.25 2.25Zm6-10.125a1.875 1.875 0 1 1-3.75 0 1.875 1.875 0 0 1 3.75 0Zm1.294 6.336a6.721 6.721 0 0 1-3.17.789 6.721 6.721 0 0 1-3.168-.789 3.376 3.376 0 0 1 6.338 0Z" />
+                  </svg>
+                  <span data-i18n="nav.contacts">Contacts</span>
+                </button>
+              </li>
+              <li>
+                <button class="sv-nav-btn" data-nav="pair">
+                  <!-- device-phone-mobile icon -->
+                  <svg viewBox="0 0 24 24" stroke-width="1.6" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 1.5H8.25A2.25 2.25 0 0 0 6 3.75v16.5a2.25 2.25 0 0 0 2.25 2.25h7.5A2.25 2.25 0 0 0 18 20.25V3.75a2.25 2.25 0 0 0-2.25-2.25H13.5m-3 0V3h3V1.5m-3 0h3m-3 18.75h3" />
+                  </svg>
+                  <span data-i18n="nav.pair">Pair</span>
+                </button>
+              </li>
+              <li>
+                <button class="sv-nav-btn" data-nav="settings">
+                  <!-- cog icon -->
+                  <svg viewBox="0 0 24 24" stroke-width="1.6" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 0 1 1.37.49l1.296 2.247a1.125 1.125 0 0 1-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 0 1 0 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 0 1-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 0 1-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 0 1-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 0 1-1.369-.49l-1.297-2.247a1.125 1.125 0 0 1 .26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 0 1 0-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 0 1-.26-1.43l1.297-2.247a1.125 1.125 0 0 1 1.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.213-1.281Z" />
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
+                  </svg>
+                  <span data-i18n="nav.settings">Settings</span>
+                </button>
+              </li>
+            </ul>
+          </nav>
+        </aside>
+
+        <main class="sv-main">
+          <!-- Inbox -->
+          <section class="sv-pane" data-pane="inbox">
+            <section class="card" aria-labelledby="inbox-h">
+              <h2 id="inbox-h" data-i18n="inbox.h">Inbox</h2>
+              <p class="muted" data-i18n="inbox.muted">
+                DMs arriving on this node, newest first.
+              </p>
+              <ul id="inbox" class="inbox-list"></ul>
+            </section>
+          </section>
+
+          <!-- Sides (Node start/stop + Hosted sides) -->
+          <section class="sv-pane" data-pane="sides" hidden>
+            <section class="card" aria-labelledby="node-h">
+              <h2 id="node-h" data-i18n="node.h">Node</h2>
+              <p class="muted" data-i18n="node.muted">
+                Start the embedded protocol node, then dial a peer.
+              </p>
+              <div class="row">
+                <input
+                  id="data-dir"
+                  type="text"
+                  spellcheck="false"
+                  data-i18n-placeholder="node.data_dir.placeholder"
+                  placeholder="data directory (e.g. /tmp/sidevers-alice)"
+                />
+              </div>
+              <div class="row">
+                <input
+                  id="side-label"
+                  type="text"
+                  spellcheck="false"
+                  data-i18n-placeholder="node.side_label.placeholder"
+                  placeholder="primary side label (e.g. &quot;work&quot;)"
+                  value="work"
+                />
+                <button id="start-node" data-i18n="btn.start_node">Start node</button>
+                <button id="stop-node" class="secondary" disabled data-i18n="btn.stop_node">
+                  Stop node
+                </button>
+              </div>
+            </section>
+
+            <section class="card" aria-labelledby="sides-h">
+              <h2 id="sides-h" data-i18n="sides.h">Hosted sides</h2>
+              <p class="muted" data-i18n="sides.muted">
+                Each side is an independent identity with its own QUIC endpoint
+                (spec §7.6). Click a side to make it active — Connect, Send,
+                and Pair below operate from the active side.
+              </p>
+              <ul id="sides-list" class="sides-list"></ul>
+              <div class="row">
+                <input
+                  id="extra-side-label"
+                  type="text"
+                  spellcheck="false"
+                  data-i18n-placeholder="sides.extra_label.placeholder"
+                  placeholder="new side label (e.g. &quot;private&quot;)"
+                />
+                <button id="add-side" disabled data-i18n="btn.add_side">Add side</button>
+                <button id="refresh-sides" class="secondary" disabled data-i18n="btn.refresh_sides">
+                  Refresh
+                </button>
+              </div>
+            </section>
+          </section>
+
+          <!-- Send (Dial peer + Compose DM) -->
+          <section class="sv-pane" data-pane="send" hidden>
+            <section class="card" aria-labelledby="peer-h">
+              <h2 id="peer-h" data-i18n="peer.h">Dial peer</h2>
+              <p class="muted" data-i18n="peer.muted">
+                Connect to another node by network address, from the active
+                hosted side.
+              </p>
+              <div class="row">
+                <label class="label" data-i18n="peer.from_label">Connect from</label>
+                <input id="connect-from-side" type="text" spellcheck="false" readonly />
+              </div>
+              <div class="row">
+                <input
+                  id="peer-addr"
+                  type="text"
+                  spellcheck="false"
+                  data-i18n-placeholder="peer.addr.placeholder"
+                  placeholder="peer listen addr (e.g. 127.0.0.1:50001)"
+                />
+                <button id="connect-peer" disabled data-i18n="btn.connect">Connect</button>
+              </div>
+              <div class="row">
+                <label class="label" data-i18n="peer.connected_label">Connected peer</label>
+                <input id="peer-side" type="text" spellcheck="false" readonly />
+              </div>
+            </section>
+
+            <section class="card" aria-labelledby="send-h">
+              <h2 id="send-h" data-i18n="send.h">Send a DM</h2>
+              <p class="muted" data-i18n="send.muted">
+                Sent over the active side's open session to its connected peer.
+              </p>
+              <textarea id="dm-text" data-i18n-placeholder="send.text.placeholder" placeholder="message…"></textarea>
+              <div class="row">
+                <button id="send-dm" disabled data-i18n="btn.send">Send</button>
+              </div>
+            </section>
+          </section>
+
+          <!-- Contacts -->
+          <section class="sv-pane" data-pane="contacts" hidden>
+            <section class="card" aria-labelledby="contacts-h">
+              <h2 id="contacts-h" data-i18n="contacts.h">Contacts</h2>
+              <p class="muted" data-i18n="contacts.muted">
+                Local-only contacts for the active side (§7.4). The list is
+                never published; each entry's capability set overrides the
+                peer's profile for traffic accepted from them.
+              </p>
+              <ul id="contacts-list" class="sides-list"></ul>
+              <div class="row">
+                <input
+                  id="contact-addr"
+                  type="text"
+                  spellcheck="false"
+                  data-i18n-placeholder="contacts.addr_placeholder"
+                  placeholder="contact's side address (sv1…)"
+                />
+              </div>
+              <div class="row">
+                <input
+                  id="contact-nick"
+                  type="text"
+                  spellcheck="false"
+                  data-i18n-placeholder="contacts.nick_placeholder"
+                  placeholder="nickname (local-only)"
+                />
+                <input
+                  id="contact-caps"
+                  type="text"
+                  spellcheck="false"
+                  data-i18n-placeholder="contacts.caps_placeholder"
+                  placeholder="capabilities (comma-separated)"
+                  value="direct-message"
+                />
+                <button id="contact-add" data-i18n="btn.contact_add">Add contact</button>
+              </div>
+            </section>
+          </section>
+
+          <!-- Pair (show QR + accept QR) -->
+          <section class="sv-pane" data-pane="pair" hidden>
+            <section class="card" aria-labelledby="pair-show-h">
+              <h2 id="pair-show-h" data-i18n="pair_show.h">Pair another device</h2>
+              <p class="muted" data-i18n="pair_show.muted">
+                Generate a QR for the active side. Show it on the existing
+                device — a new device scans it (or pastes the URI below) to
+                install this side and become a co-holder. The QR carries a
+                one-time nonce valid for 10 minutes.
+              </p>
+              <div class="row">
+                <label class="label" data-i18n="pair_show.from_label">Pair from side</label>
+                <input id="pair-from-side" type="text" spellcheck="false" readonly />
+              </div>
+              <div class="row">
+                <button id="gen-qr" disabled data-i18n="btn.gen_qr">Generate pairing QR</button>
+              </div>
+              <div id="qr-display" class="qr-display" hidden>
+                <div id="qr-svg" class="qr-svg"></div>
+                <label class="label" data-i18n="pair_show.uri_label">URI (paste this into the other device)</label>
+                <textarea id="qr-uri" readonly></textarea>
+              </div>
+            </section>
+
+            <section class="card" aria-labelledby="pair-accept-h">
+              <h2 id="pair-accept-h" data-i18n="pair_accept.h">Pair this device</h2>
+              <p class="muted" data-i18n="pair_accept.muted">
+                On the new device: paste the URI from the existing device's QR
+                to install its side here.
+              </p>
+              <textarea
+                id="accept-uri"
+                data-i18n-placeholder="pair_accept.uri.placeholder"
+                placeholder="sidevers-pair:1:..."
+              ></textarea>
+              <div class="row">
+                <button id="accept-qr" disabled data-i18n="btn.accept_qr">Accept pairing</button>
+              </div>
+            </section>
+          </section>
+
+          <!-- Settings (profile editor for now; theme toggle comes in Stage C) -->
+          <section class="sv-pane" data-pane="settings" hidden>
+            <section class="card" aria-labelledby="profile-h">
+              <h2 id="profile-h" data-i18n="profile.h">Profile</h2>
+              <p class="muted" data-i18n="profile.muted">
+                Per-side profile (§7.3). Published to peers who fetch it,
+                and consulted by them to gate which message types they'll
+                send to you (§7.7 capability tokens). Edits below sign +
+                publish under the active side.
+              </p>
+              <div class="row">
+                <label class="label" data-i18n="profile.name_label">Display name</label>
+                <input id="profile-name" type="text" spellcheck="false" />
+              </div>
+              <div class="row">
+                <label class="label" data-i18n="profile.bio_label">Bio</label>
+                <textarea id="profile-bio"></textarea>
+              </div>
+              <div class="row">
+                <label class="label" data-i18n="profile.caps_label">Capabilities</label>
+                <input
+                  id="profile-caps"
+                  type="text"
+                  spellcheck="false"
+                  data-i18n-placeholder="profile.caps_placeholder"
+                  placeholder="direct-message, storage-host, verse-host (comma-separated)"
+                />
+              </div>
+              <div class="row">
+                <button id="profile-load" class="secondary" data-i18n="btn.profile_load">
+                  Reload from store
+                </button>
+                <button id="profile-save" data-i18n="btn.profile_save">
+                  Sign + publish profile
+                </button>
+              </div>
+            </section>
+          </section>
+
+          <pre id="error" class="error" role="alert"></pre>
+        </main>
       </div>
-    </header>
+    </div>
 
-    <main>
-      <section class="card" aria-labelledby="node-h">
-        <h2 id="node-h" data-i18n="node.h">Node</h2>
-        <p class="muted" data-i18n="node.muted">
-          Start the embedded protocol node, then dial a peer.
-        </p>
-        <div class="row">
-          <input
-            id="data-dir"
-            type="text"
-            spellcheck="false"
-            data-i18n-placeholder="node.data_dir.placeholder"
-            placeholder="data directory (e.g. /tmp/sidevers-alice)"
-          />
-        </div>
-        <div class="row">
-          <input
-            id="side-label"
-            type="text"
-            spellcheck="false"
-            data-i18n-placeholder="node.side_label.placeholder"
-            placeholder="primary side label (e.g. &quot;work&quot;)"
-            value="work"
-          />
-          <button id="start-node" data-i18n="btn.start_node">Start node</button>
-          <button id="stop-node" class="secondary" disabled data-i18n="btn.stop_node">
-            Stop node
-          </button>
-        </div>
-      </section>
-
-      <section class="card" aria-labelledby="sides-h">
-        <h2 id="sides-h">Hosted sides</h2>
-        <p class="muted">
-          Each side is an independent identity with its own QUIC endpoint
-          (spec §7.6). Click a side to make it active — Connect, Send,
-          and Pair below operate from the active side.
-        </p>
-        <ul id="sides-list" class="sides-list"></ul>
-        <div class="row">
-          <input
-            id="extra-side-label"
-            type="text"
-            spellcheck="false"
-            placeholder="new side label (e.g. &quot;private&quot;)"
-          />
-          <button id="add-side" disabled>Add side</button>
-          <button id="refresh-sides" class="secondary" disabled>Refresh</button>
-        </div>
-      </section>
-
-      <section class="card" aria-labelledby="peer-h">
-        <h2 id="peer-h">Dial peer</h2>
-        <p class="muted">
-          Connect to another node by network address, from the active
-          hosted side.
-        </p>
-        <div class="row">
-          <label class="label">Connect from</label>
-          <input id="connect-from-side" type="text" spellcheck="false" readonly />
-        </div>
-        <div class="row">
-          <input
-            id="peer-addr"
-            type="text"
-            spellcheck="false"
-            placeholder="peer listen addr (e.g. 127.0.0.1:50001)"
-          />
-          <button id="connect-peer" disabled>Connect</button>
-        </div>
-        <div class="row">
-          <label class="label">Connected peer</label>
-          <input id="peer-side" type="text" spellcheck="false" readonly />
-        </div>
-      </section>
-
-      <section class="card" aria-labelledby="send-h">
-        <h2 id="send-h">Send a DM</h2>
-        <p class="muted">
-          Sent over the active side's open session to its connected peer.
-        </p>
-        <textarea id="dm-text" placeholder="message…"></textarea>
-        <div class="row">
-          <button id="send-dm" disabled>Send</button>
-        </div>
-      </section>
-
-      <section class="card" aria-labelledby="inbox-h">
-        <h2 id="inbox-h">Inbox</h2>
-        <p class="muted">DMs arriving on this node, newest first.</p>
-        <ul id="inbox" class="inbox-list"></ul>
-      </section>
-
-      <section class="card" aria-labelledby="profile-h">
-        <h2 id="profile-h" data-i18n="profile.h">Profile</h2>
-        <p class="muted" data-i18n="profile.muted">
-          Per-side profile (§7.3). Published to peers who fetch it,
-          and consulted by them to gate which message types they'll
-          send to you (§7.7 capability tokens). Edits below sign +
-          publish under the active side.
-        </p>
-        <div class="row">
-          <label class="label" data-i18n="profile.name_label">Display name</label>
-          <input id="profile-name" type="text" spellcheck="false" />
-        </div>
-        <div class="row">
-          <label class="label" data-i18n="profile.bio_label">Bio</label>
-          <textarea id="profile-bio"></textarea>
-        </div>
-        <div class="row">
-          <label class="label" data-i18n="profile.caps_label">Capabilities</label>
-          <input
-            id="profile-caps"
-            type="text"
-            spellcheck="false"
-            data-i18n-placeholder="profile.caps_placeholder"
-            placeholder="direct-message, storage-host, verse-host (comma-separated)"
-          />
-        </div>
-        <div class="row">
-          <button id="profile-load" class="secondary" data-i18n="btn.profile_load">
-            Reload from store
-          </button>
-          <button id="profile-save" data-i18n="btn.profile_save">
-            Sign + publish profile
-          </button>
-        </div>
-      </section>
-
-      <section class="card" aria-labelledby="contacts-h">
-        <h2 id="contacts-h" data-i18n="contacts.h">Contacts</h2>
-        <p class="muted" data-i18n="contacts.muted">
-          Local-only contacts for the active side (§7.4). The list is
-          never published; each entry's capability set overrides the
-          peer's profile for traffic accepted from them.
-        </p>
-        <ul id="contacts-list" class="sides-list"></ul>
-        <div class="row">
-          <input
-            id="contact-addr"
-            type="text"
-            spellcheck="false"
-            data-i18n-placeholder="contacts.addr_placeholder"
-            placeholder="contact's side address (sv1…)"
-          />
-        </div>
-        <div class="row">
-          <input
-            id="contact-nick"
-            type="text"
-            spellcheck="false"
-            data-i18n-placeholder="contacts.nick_placeholder"
-            placeholder="nickname (local-only)"
-          />
-          <input
-            id="contact-caps"
-            type="text"
-            spellcheck="false"
-            data-i18n-placeholder="contacts.caps_placeholder"
-            placeholder="capabilities (comma-separated)"
-            value="direct-message"
-          />
-          <button id="contact-add" data-i18n="btn.contact_add">Add contact</button>
-        </div>
-      </section>
-
-      <section class="card" aria-labelledby="pair-show-h">
-        <h2 id="pair-show-h">Pair another device</h2>
-        <p class="muted">
-          Generate a QR for the active side. Show it on the existing
-          device — a new device scans it (or pastes the URI below) to
-          install this side and become a co-holder. The QR carries a
-          one-time nonce valid for 10 minutes.
-        </p>
-        <div class="row">
-          <label class="label">Pair from side</label>
-          <input id="pair-from-side" type="text" spellcheck="false" readonly />
-        </div>
-        <div class="row">
-          <button id="gen-qr" disabled>Generate pairing QR</button>
-        </div>
-        <div id="qr-display" class="qr-display" hidden>
-          <div id="qr-svg" class="qr-svg"></div>
-          <label class="label">URI (paste this into the other device)</label>
-          <textarea id="qr-uri" readonly></textarea>
-        </div>
-      </section>
-
-      <section class="card" aria-labelledby="pair-accept-h">
-        <h2 id="pair-accept-h">Pair this device</h2>
-        <p class="muted">
-          On the new device: paste the URI from the existing device's QR
-          to install its side here.
-        </p>
-        <textarea
-          id="accept-uri"
-          placeholder="sidevers-pair:1:..."
-        ></textarea>
-        <div class="row">
-          <button id="accept-qr" disabled>Accept pairing</button>
-        </div>
-      </section>
-
-      <pre id="error" class="error" role="alert"></pre>
-    </main>
-
-    <!-- Phase 3.H: i18n shim loads as a module so it can fetch JSON
-         bundles + own its own state. main.js is plain-script for
-         simplicity; it talks to i18n.js via window.__sv_i18n set by
-         the module. Phase 3.D onboarding.js sits between them: it
-         checks is_onboarded() on load and either shows the wizard or
-         hides #onboarding so main.js renders the regular UI. -->
+    <!-- Phase 3.H i18n shim loads as a module. main.js is plain-script;
+         they communicate via window.__sv_i18n set by the module.
+         Phase 3.D onboarding.js sits between them: it checks
+         is_onboarded() on load and either reveals the wizard or hides
+         #onboarding so main.js renders the regular UI. -->
     <script type="module" src="i18n.js"></script>
     <script src="onboarding.js"></script>
     <script src="main.js"></script>

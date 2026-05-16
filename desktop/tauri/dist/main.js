@@ -76,6 +76,29 @@ function enable(...ids) {
   for (const id of ids) $(id).disabled = false;
 }
 
+// ---- Stage B: sidebar section switching --------------------------------
+// The sidebar has six <button data-nav="..."> items. The main pane has
+// six <section class="sv-pane" data-pane="..."> matching by name. Click
+// the nav button → hide every pane, reveal the matching one, mark the
+// clicked nav button as data-active="true". Default landing is "inbox"
+// (the HTML ships with inbox pane visible + inbox nav button active).
+function showSection(name) {
+  for (const pane of document.querySelectorAll("[data-pane]")) {
+    pane.hidden = pane.dataset.pane !== name;
+  }
+  for (const btn of document.querySelectorAll(".sv-nav-btn[data-nav]")) {
+    if (btn.dataset.nav === name) {
+      btn.setAttribute("data-active", "true");
+    } else {
+      btn.removeAttribute("data-active");
+    }
+  }
+}
+
+for (const btn of document.querySelectorAll(".sv-nav-btn[data-nav]")) {
+  btn.addEventListener("click", () => showSection(btn.dataset.nav));
+}
+
 function shortenAddr(addr) {
   if (!addr || addr.length < 16) return addr || "";
   return `${addr.slice(0, 10)}…${addr.slice(-6)}`;

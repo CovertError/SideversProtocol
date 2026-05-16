@@ -67,5 +67,13 @@
   "contacts.addr_placeholder": "عنوان جانب جهة الاتصال (sv1…)",
   "contacts.nick_placeholder": "اللقب (محلي فقط)",
   "contacts.caps_placeholder": "الصلاحيات (مفصولة بفواصل)",
-  "btn.contact_add": "أضف جهة اتصال"
+  "btn.contact_add": "أضف جهة اتصال",
+  "nav.aria": "التنقل الرئيسي",
+  "nav.inbox": "البريد",
+  "nav.sides": "الجوانب",
+  "nav.send": "إرسال",
+  "nav.contacts": "جهات الاتصال",
+  "nav.pair": "الاقتران",
+  "nav.settings": "الإعدادات",
+  "nav.active_side": "الجانب النشط"
 }

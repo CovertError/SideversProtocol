@@ -67,5 +67,13 @@
   "contacts.addr_placeholder": "contact's side address (sv1…)",
   "contacts.nick_placeholder": "nickname (local-only)",
   "contacts.caps_placeholder": "capabilities (comma-separated)",
-  "btn.contact_add": "Add contact"
+  "btn.contact_add": "Add contact",
+  "nav.aria": "Primary navigation",
+  "nav.inbox": "Inbox",
+  "nav.sides": "Sides",
+  "nav.send": "Send",
+  "nav.contacts": "Contacts",
+  "nav.pair": "Pair",
+  "nav.settings": "Settings",
+  "nav.active_side": "Active side"
 }

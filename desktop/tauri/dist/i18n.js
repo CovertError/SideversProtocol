@@ -59,6 +59,9 @@ export function applyTranslations(root) {
   for (const el of root.querySelectorAll("[data-i18n-title]")) {
     el.title = t(el.getAttribute("data-i18n-title"));
   }
+  for (const el of root.querySelectorAll("[data-i18n-aria-label]")) {
+    el.setAttribute("aria-label", t(el.getAttribute("data-i18n-aria-label")));
+  }
 }
 
 export function currentLocale() {
