@@ -3428,6 +3428,7 @@ dependencies = [
  "serde_json",
  "sidevers-core",
  "sidevers-net",
+ "sidevers-storage",
  "tauri",
  "tauri-build",
  "tempfile",

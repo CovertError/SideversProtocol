@@ -291,6 +291,346 @@ function sessionKey(side, peer) {
   return `${side}|${peer}`;
 }
 
+// ---- Stage D L4: media (image + voice) helpers ----
+
+// Cache fetched media URLs by hash so a re-render doesn't re-fetch.
+const mediaUrlCache = new Map(); // hash_hex -> file URL
+const mediaInFlight = new Set(); // hash_hex currently being fetched
+
+// State for an in-progress voice recording. Holds the MediaRecorder
+// instance + recorded chunks + the start timestamp for the elapsed
+// counter. Only one recording at a time.
+let voiceRec = null;
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error || new Error("read failed"));
+    reader.onload = () => {
+      const result = reader.result;
+      // Strip the data: URL prefix to get raw base64.
+      const idx = result.indexOf(",");
+      resolve(idx >= 0 ? result.slice(idx + 1) : result);
+    };
+    reader.readAsDataURL(blob);
+  });
+}
+
+// Resize an image File to <= TARGET on each side via canvas, JPEG q=0.85.
+// Returns base64 of the JPEG bytes.
+async function resizeImageToBase64(file) {
+  const TARGET = 1280;
+  const QUALITY = 0.85;
+  const dataUrl = await new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onerror = () => reject(r.error || new Error("read failed"));
+    r.onload = () => resolve(r.result);
+    r.readAsDataURL(file);
+  });
+  const img = await new Promise((resolve, reject) => {
+    const i = new Image();
+    i.onerror = () => reject(new Error("not a valid image"));
+    i.onload = () => resolve(i);
+    i.src = dataUrl;
+  });
+  let w = img.width;
+  let h = img.height;
+  if (Math.max(w, h) > TARGET) {
+    const scale = TARGET / Math.max(w, h);
+    w = Math.round(w * scale);
+    h = Math.round(h * scale);
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(img, 0, 0, w, h);
+  const blob = await new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (b) => (b ? resolve(b) : reject(new Error("canvas.toBlob failed"))),
+      "image/jpeg",
+      QUALITY,
+    );
+  });
+  return blobToBase64(blob);
+}
+
+// Fetch a media object by hash. Returns a webview-loadable URL or
+// throws on failure. Multiple concurrent renders for the same hash
+// share a single in-flight promise so we don't fetch twice.
+async function getMediaUrl(hash_hex, peer_dial, from_side) {
+  if (!hash_hex) throw new Error("media: missing hash");
+  if (mediaUrlCache.has(hash_hex)) return mediaUrlCache.get(hash_hex);
+  if (mediaInFlight.has(hash_hex)) {
+    // Spin until the in-flight call finishes. Cheap busy-wait
+    // (resolves in ms); avoids re-fetching the same object.
+    await new Promise((r) => setTimeout(r, 50));
+    if (mediaUrlCache.has(hash_hex)) return mediaUrlCache.get(hash_hex);
+  }
+  mediaInFlight.add(hash_hex);
+  try {
+    const path = await call("fetch_media", {
+      dataDir: state.dataDir,
+      hashHex: hash_hex,
+      peerListenAddr: peer_dial || null,
+      fromSide: from_side || null,
+    });
+    const url = fileSrc(path);
+    mediaUrlCache.set(hash_hex, url);
+    return url;
+  } finally {
+    mediaInFlight.delete(hash_hex);
+  }
+}
+
+// Build a message-body DOM node for a media message. The element
+// kicks off the fetch on first render; on success the placeholder
+// is swapped for the real <img> / <audio>.
+function buildMediaBody(msg, peer_dial, from_side) {
+  const wrap = document.createElement("div");
+  if (msg.mediaKind === "image") {
+    const ph = document.createElement("div");
+    ph.className = "sv-msg-media-loading";
+    ph.textContent = t("media.loading_image") || "Loading image…";
+    wrap.appendChild(ph);
+    getMediaUrl(msg.media_hash_hex, peer_dial, from_side)
+      .then((url) => {
+        const img = document.createElement("img");
+        img.className = "sv-msg-image";
+        img.src = url;
+        img.alt = "";
+        img.onclick = () => openImageModal(url);
+        wrap.innerHTML = "";
+        wrap.appendChild(img);
+      })
+      .catch((e) => {
+        ph.className = "sv-msg-media-error";
+        ph.textContent =
+          (t("media.error_image") || "Image unavailable") + ": " + (e?.message || e);
+      });
+  } else if (msg.mediaKind === "voice") {
+    const ph = document.createElement("div");
+    ph.className = "sv-msg-media-loading";
+    ph.textContent = t("media.loading_voice") || "Loading voice note…";
+    wrap.appendChild(ph);
+    getMediaUrl(msg.media_hash_hex, peer_dial, from_side)
+      .then((url) => {
+        const audio = document.createElement("audio");
+        audio.className = "sv-msg-audio";
+        audio.controls = true;
+        audio.src = url;
+        if (msg.media_mime) audio.type = msg.media_mime;
+        wrap.innerHTML = "";
+        wrap.appendChild(audio);
+      })
+      .catch((e) => {
+        ph.className = "sv-msg-media-error";
+        ph.textContent =
+          (t("media.error_voice") || "Voice note unavailable") + ": " + (e?.message || e);
+      });
+  } else {
+    // Unknown media kind — show the text body as fallback.
+    wrap.textContent = msg.plaintext || "";
+  }
+  return wrap;
+}
+
+function openImageModal(url) {
+  const modal = $("sv-image-modal");
+  const img = $("sv-image-modal-img");
+  if (!modal || !img) return;
+  img.src = url;
+  modal.hidden = false;
+}
+
+function closeImageModal() {
+  const modal = $("sv-image-modal");
+  if (modal) modal.hidden = true;
+}
+
+// Outgoing: send an image in the current thread. Uses the same
+// ensure-session pattern as text DMs. Group media is deferred —
+// post_to_group needs a different path.
+async function sendImageInCurrentThread(file) {
+  if (state.activeGroup) {
+    showError(
+      t("media.group_not_yet") ||
+        "Media in groups is coming next — DMs only for now.",
+    );
+    return;
+  }
+  const peer = state.view?.params?.peer;
+  if (!peer || !state.activeSide) return;
+  const key = sessionKey(state.activeSide, peer);
+  const sess = state.sessions.get(key);
+  if (sess?.status !== "open") {
+    await ensureSessionFor(state.activeSide, peer);
+    const after = state.sessions.get(key);
+    if (after?.status !== "open") {
+      throw new Error(after?.error || "couldn't open session");
+    }
+  }
+  const imageB64 = await resizeImageToBase64(file);
+  const resp = await call("send_dm_media", {
+    dataDir: state.dataDir,
+    fromSide: state.activeSide,
+    kind: "image",
+    mediaB64: imageB64,
+  });
+  // Pre-warm cache so own image renders immediately without re-fetch.
+  try {
+    const url = await getMediaUrl(resp.hash_hex, null, state.activeSide);
+    mediaUrlCache.set(resp.hash_hex, url);
+  } catch {}
+  const now = Math.floor(Date.now() / 1000);
+  appendChat(state.activeSide, peer, {
+    from: state.activeSide,
+    to: peer,
+    plaintext: "",
+    received_at: now,
+    kind: "out",
+    mediaKind: "image",
+    media_hash_hex: resp.hash_hex,
+    media_size: resp.size,
+    media_mime: resp.mime,
+  });
+  renderInside();
+  renderView();
+  showOk(t("toast.image_sent") || "Image sent");
+}
+
+async function startVoiceRecording() {
+  if (state.activeGroup) {
+    showError(
+      t("media.group_not_yet") ||
+        "Voice in groups is coming next — DMs only for now.",
+    );
+    return;
+  }
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error("microphone API unavailable in this webview");
+  }
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  let mimeType = "audio/webm;codecs=opus";
+  if (
+    typeof MediaRecorder !== "undefined" &&
+    !MediaRecorder.isTypeSupported?.(mimeType)
+  ) {
+    mimeType = MediaRecorder.isTypeSupported?.("audio/webm")
+      ? "audio/webm"
+      : MediaRecorder.isTypeSupported?.("audio/ogg")
+        ? "audio/ogg"
+        : "";
+  }
+  const rec = mimeType
+    ? new MediaRecorder(stream, { mimeType })
+    : new MediaRecorder(stream);
+  const chunks = [];
+  rec.ondataavailable = (e) => {
+    if (e.data && e.data.size > 0) chunks.push(e.data);
+  };
+  voiceRec = {
+    rec,
+    chunks,
+    stream,
+    startedAt: Date.now(),
+    mimeType: rec.mimeType || "audio/webm",
+    timer: null,
+  };
+  rec.start();
+  const indicator = $("compose-recording");
+  if (indicator) indicator.hidden = false;
+  const timeEl = $("compose-recording-time");
+  voiceRec.timer = setInterval(() => {
+    const sec = Math.floor((Date.now() - voiceRec.startedAt) / 1000);
+    if (timeEl)
+      timeEl.textContent = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+  }, 250);
+}
+
+function teardownVoiceRecording() {
+  if (!voiceRec) return;
+  clearInterval(voiceRec.timer);
+  try {
+    voiceRec.stream.getTracks().forEach((t) => t.stop());
+  } catch {}
+  const indicator = $("compose-recording");
+  if (indicator) indicator.hidden = true;
+  voiceRec = null;
+}
+
+function cancelVoiceRecording() {
+  if (!voiceRec) return;
+  try {
+    voiceRec.rec.stop();
+  } catch {}
+  teardownVoiceRecording();
+}
+
+async function stopVoiceRecording() {
+  if (!voiceRec) return;
+  const peer = state.view?.params?.peer;
+  if (!peer || !state.activeSide) {
+    cancelVoiceRecording();
+    return;
+  }
+  const rec = voiceRec.rec;
+  const chunks = voiceRec.chunks;
+  const mimeType = voiceRec.mimeType;
+  // Wait for the final dataavailable event before reading chunks.
+  const stopped = new Promise((resolve) => {
+    rec.onstop = resolve;
+  });
+  try {
+    rec.stop();
+  } catch {}
+  await stopped;
+  teardownVoiceRecording();
+
+  if (chunks.length === 0) {
+    showError(t("toast.voice_empty") || "Voice recording was empty");
+    return;
+  }
+  const blob = new Blob(chunks, { type: mimeType });
+
+  // Ensure session before upload (same pattern as image send).
+  const key = sessionKey(state.activeSide, peer);
+  const sess = state.sessions.get(key);
+  if (sess?.status !== "open") {
+    await ensureSessionFor(state.activeSide, peer);
+    const after = state.sessions.get(key);
+    if (after?.status !== "open") {
+      throw new Error(after?.error || "couldn't open session");
+    }
+  }
+  const audioB64 = await blobToBase64(blob);
+  const resp = await call("send_dm_media", {
+    dataDir: state.dataDir,
+    fromSide: state.activeSide,
+    kind: "voice",
+    mediaB64: audioB64,
+  });
+  try {
+    const url = await getMediaUrl(resp.hash_hex, null, state.activeSide);
+    mediaUrlCache.set(resp.hash_hex, url);
+  } catch {}
+  const now = Math.floor(Date.now() / 1000);
+  appendChat(state.activeSide, peer, {
+    from: state.activeSide,
+    to: peer,
+    plaintext: "",
+    received_at: now,
+    kind: "out",
+    mediaKind: "voice",
+    media_hash_hex: resp.hash_hex,
+    media_size: resp.size,
+    media_mime: resp.mime,
+  });
+  renderInside();
+  renderView();
+  showOk(t("toast.voice_sent") || "Voice note sent");
+}
+
 // =====================================================================
 // Boot — called by onboarding.js once the node is up.
 // =====================================================================
@@ -1122,7 +1462,19 @@ function renderThread(params) {
     }
     const body = document.createElement("div");
     body.className = "sv-msg-body";
-    body.textContent = m.plaintext;
+    if (m.mediaKind === "image" || m.mediaKind === "voice") {
+      // Stage D L4: media bubble. peer_dial + from_side are needed so
+      // the fetch path can dial the sender if we don't have the
+      // object cached locally yet. For our own outgoing messages the
+      // object IS already in our ObjectStore so no dial is needed.
+      const friend = (state.friends.get(state.activeSide) || []).find(
+        (r) => r.address === m.from || r.address === peer,
+      );
+      const peerDial = friend?.peer_listen_addr || null;
+      body.appendChild(buildMediaBody(m, peerDial, state.activeSide));
+    } else {
+      body.textContent = m.plaintext;
+    }
     content.appendChild(body);
 
     row.appendChild(content);
@@ -1399,12 +1751,20 @@ function onInboxDm(payload) {
   const sideAddr = payload.to;
   const peer = payload.from;
   if (!sideAddr || !peer) return;
+  // Stage D L4: pass media metadata (kind, hash, size, mime) through
+  // to the in-memory chat log as `mediaKind` etc.; the `kind` field
+  // in the chat-message object means direction ("in"/"out"), not
+  // message type.
   appendChat(sideAddr, peer, {
     from: peer,
     to: sideAddr,
     plaintext: payload.plaintext,
     received_at: payload.received_at,
     kind: "in",
+    mediaKind: payload.kind === "text" ? null : payload.kind,
+    media_hash_hex: payload.media_hash_hex || null,
+    media_size: payload.media_size || null,
+    media_mime: payload.media_mime || null,
   });
   // If the message arrived while the user is actively viewing that
   // thread, auto-mark-read so the unread badge never appears for it.
@@ -1445,6 +1805,10 @@ async function loadInboxHistory(side) {
         plaintext: e.plaintext,
         received_at: e.received_at,
         kind: "in",
+        mediaKind: e.kind === "text" ? null : e.kind,
+        media_hash_hex: e.media_hash_hex || null,
+        media_size: e.media_size || null,
+        media_mime: e.media_mime || null,
       });
     }
   } catch (e) {
@@ -1543,6 +1907,42 @@ function attachStaticHandlers() {
     if (state.view.name === "thread") {
       showView("friend", { peer: state.view.params.peer });
     }
+  });
+
+  // Stage D L4: attach image. The button clicks the hidden file
+  // input; the input's change handler resizes + uploads + mirrors.
+  $("compose-attach")?.addEventListener("click", () =>
+    $("compose-image-file")?.click(),
+  );
+  $("compose-image-file")?.addEventListener("change", (e) =>
+    safe(async () => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      e.target.value = ""; // allow re-pick of same file
+      await sendImageInCurrentThread(file);
+    }),
+  );
+
+  // Stage D L4: voice recording. Click mic to start, then either
+  // Send (stop + upload) or Cancel (drop). Browser handles the
+  // microphone-permission prompt the first time.
+  $("compose-mic")?.addEventListener("click", () =>
+    safe(async () => {
+      if (voiceRec) return; // already recording
+      await startVoiceRecording();
+    }),
+  );
+  $("compose-recording-stop")?.addEventListener("click", () =>
+    safe(stopVoiceRecording),
+  );
+  $("compose-recording-cancel")?.addEventListener("click", () => {
+    cancelVoiceRecording();
+  });
+
+  // Stage D L4: image-modal close on click + Escape.
+  $("sv-image-modal")?.addEventListener("click", closeImageModal);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeImageModal();
   });
 
   // Friend detail save/remove.

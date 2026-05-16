@@ -38,8 +38,9 @@ use sidevers_core::{
 };
 use sidevers_net::{
     InboxEntry, InboxStore, Intent, Node, Session, SideRelationship, SideStore, VerseHost,
-    VerseMembershipRecord, post_to_verse, send_dm as send_dm_helper,
+    VerseMembershipRecord, fetch_object, post_to_verse, send_dm as send_dm_helper,
 };
+use sidevers_storage::{ObjectStore, Reference};
 use std::collections::BTreeSet;
 use tauri::{Emitter, State};
 use tokio::sync::Mutex;
@@ -113,6 +114,80 @@ struct InboxDm {
     /// them by recency. Stored in `inbox.received_at`; live events
     /// fill it with the current wall-clock at receive time.
     received_at: u64,
+    /// Stage D L4: message kind. "text" (default), "image", or
+    /// "voice". Media DMs carry a content-addressed Reference in
+    /// the next three fields.
+    kind: String,
+    media_hash_hex: Option<String>,
+    media_size: Option<u64>,
+    media_mime: Option<String>,
+}
+
+/// Stage D L4: try decoding raw plaintext bytes as a
+/// `DirectMessagePayload`. Returns a `(kind, text, media_ref)` tuple.
+/// Legacy text DMs from before Stage D were sent as raw UTF-8 bytes
+/// without DirectMessagePayload wrapping; if decode fails we fall
+/// back to a UTF-8 lossy interpretation so they still render.
+fn decode_dm_plaintext(bytes: &[u8]) -> (String, String, Option<Reference>) {
+    use sidevers_core::messages::direct::{DirectBody, DirectKind, DirectMessagePayload};
+    match DirectMessagePayload::decode(bytes) {
+        Ok(payload) => {
+            let kind = match payload.kind {
+                DirectKind::Text => "text",
+                DirectKind::Image => "image",
+                DirectKind::Voice => "voice",
+                DirectKind::File => "file",
+                DirectKind::Other(_) => "other",
+            }
+            .to_owned();
+            match payload.body {
+                DirectBody::Text(s) => (kind, s, None),
+                DirectBody::ReferenceBytes(ref_bytes) => {
+                    let reference = Reference::decode(&ref_bytes).ok();
+                    (kind, String::new(), reference)
+                }
+            }
+        }
+        Err(_) => {
+            // Legacy: raw UTF-8 text from before Stage D wrapped DMs
+            // in DirectMessagePayload. Fall back to lossy decode.
+            (
+                "text".to_owned(),
+                String::from_utf8_lossy(bytes).into_owned(),
+                None,
+            )
+        }
+    }
+}
+
+/// Build an `InboxDm` event from a decrypted plaintext blob + the
+/// envelope metadata around it. Consolidates the drain + history
+/// paths so they don't drift.
+fn build_inbox_dm(
+    from_addr_bech32: String,
+    to_addr_bech32: String,
+    plaintext_bytes: &[u8],
+    received_at: u64,
+) -> InboxDm {
+    let (kind, text, media_ref) = decode_dm_plaintext(plaintext_bytes);
+    let (media_hash_hex, media_size, media_mime) = match media_ref {
+        Some(r) => (
+            Some(hex::encode(r.hash)),
+            Some(r.size),
+            Some(r.mime),
+        ),
+        None => (None, None, None),
+    };
+    InboxDm {
+        from: from_addr_bech32,
+        to: to_addr_bech32,
+        plaintext: text,
+        received_at,
+        kind,
+        media_hash_hex,
+        media_size,
+        media_mime,
+    }
 }
 
 /// Stage D L2b: a decrypted verse post surfaced to the frontend as
@@ -311,7 +386,6 @@ async fn auto_start_node(
     let inbox_for_drain = inbox.clone();
     tokio::spawn(async move {
         while let Some(dm) = node_for_drain.next_direct_message().await {
-            let plaintext = String::from_utf8_lossy(&dm.plaintext).into_owned();
             let from = Address::new(AddressKind::Side, dm.envelope.from).encode();
             let to_addr = dm.envelope.to;
             let to = to_addr
@@ -331,15 +405,11 @@ async fn auto_start_node(
                     received_at: now,
                 });
             }
-            let _ = app_for_drain.emit(
-                "inbox:dm",
-                InboxDm {
-                    from,
-                    to,
-                    plaintext,
-                    received_at: now,
-                },
-            );
+            // Stage D L4: try-decode the DirectMessagePayload to
+            // surface kind + media reference (image / voice / file).
+            // Falls back to UTF-8 text for legacy bytes.
+            let payload = build_inbox_dm(from, to, &dm.plaintext, now);
+            let _ = app_for_drain.emit("inbox:dm", payload);
         }
     });
 
@@ -896,7 +966,6 @@ async fn start_node(
     let inbox_for_drain = inbox.clone();
     tokio::spawn(async move {
         while let Some(dm) = node_for_drain.next_direct_message().await {
-            let plaintext = String::from_utf8_lossy(&dm.plaintext).into_owned();
             let from = Address::new(AddressKind::Side, dm.envelope.from).encode();
             let to_addr = dm.envelope.to;
             let to = to_addr
@@ -917,15 +986,10 @@ async fn start_node(
                     received_at: now,
                 });
             }
-            let _ = app_for_drain.emit(
-                "inbox:dm",
-                InboxDm {
-                    from,
-                    to,
-                    plaintext,
-                    received_at: now,
-                },
-            );
+            // Stage D L4: try-decode DirectMessagePayload for kind +
+            // media reference; falls back to UTF-8 for legacy text.
+            let payload = build_inbox_dm(from, to, &dm.plaintext, now);
+            let _ = app_for_drain.emit("inbox:dm", payload);
         }
     });
 
@@ -980,11 +1044,13 @@ async fn load_inbox_history(
         .map_err(|e| format!("inbox list: {e}"))?;
     Ok(entries
         .into_iter()
-        .map(|e| InboxDm {
-            from: Address::new(AddressKind::Side, e.from).encode(),
-            to: Address::new(AddressKind::Side, e.to).encode(),
-            plaintext: String::from_utf8_lossy(&e.plaintext).into_owned(),
-            received_at: e.received_at,
+        .map(|e| {
+            build_inbox_dm(
+                Address::new(AddressKind::Side, e.from).encode(),
+                Address::new(AddressKind::Side, e.to).encode(),
+                &e.plaintext,
+                e.received_at,
+            )
         })
         .collect())
 }
@@ -1595,6 +1661,267 @@ async fn send_dm_live(
         .await
         .map_err(|e| format!("send_dm: {e}"))?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------
+// Phase 3 Stage D L4 — Media messages (images + voice notes)
+// ---------------------------------------------------------------------
+//
+// Wire format reuses the existing DirectMessagePayload — its
+// `DirectKind::Image / ::Voice / ::File` variants and `DirectBody::
+// ReferenceBytes` were designed for this. The frontend resizes images
+// + records voice via Web APIs; we receive base64 bytes, drop them
+// into the local ObjectStore, build a Reference, encode a
+// DirectMessagePayload, and send via the existing send_dm_helper.
+//
+// Receivers fetch the bytes via fetch_media (StorageGet round-trip
+// to the sender's node) and cache them locally under
+// <data_dir>/media-cache/<hex>.bin.
+
+const MEDIA_CACHE_SUBDIR: &str = "media-cache";
+const MEDIA_MAX_BYTES: usize = 10 * 1024 * 1024;
+const PNG_MAGIC: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+const WEBM_MAGIC: [u8; 4] = [0x1A, 0x45, 0xDF, 0xA3];
+const OGG_MAGIC: [u8; 4] = [0x4F, 0x67, 0x67, 0x53];
+
+fn validate_image_bytes(bytes: &[u8]) -> Result<&'static str, String> {
+    if bytes.is_empty() {
+        return Err("image: empty".into());
+    }
+    if bytes.len() > MEDIA_MAX_BYTES {
+        return Err(format!(
+            "image: too large ({} bytes; max {})",
+            bytes.len(),
+            MEDIA_MAX_BYTES
+        ));
+    }
+    if bytes.len() >= 3 && bytes[..3] == JPEG_MAGIC {
+        return Ok("image/jpeg");
+    }
+    if bytes.len() >= 8 && bytes[..8] == PNG_MAGIC {
+        return Ok("image/png");
+    }
+    Err("image: only JPEG or PNG accepted".into())
+}
+
+fn validate_voice_bytes(bytes: &[u8]) -> Result<&'static str, String> {
+    if bytes.is_empty() {
+        return Err("voice: empty".into());
+    }
+    if bytes.len() > MEDIA_MAX_BYTES {
+        return Err(format!(
+            "voice: too large ({} bytes; max {})",
+            bytes.len(),
+            MEDIA_MAX_BYTES
+        ));
+    }
+    if bytes.len() >= 4 && bytes[..4] == WEBM_MAGIC {
+        return Ok("audio/webm");
+    }
+    if bytes.len() >= 4 && bytes[..4] == OGG_MAGIC {
+        return Ok("audio/ogg");
+    }
+    Err("voice: only WebM/Ogg containers accepted".into())
+}
+
+#[derive(Serialize, Clone)]
+struct MediaSendResp {
+    /// Hex BLAKE3 hash of the stored object — what the receiver will
+    /// fetch via fetch_media, and what the frontend uses to render
+    /// the local copy immediately.
+    hash_hex: String,
+    /// Size in bytes.
+    size: u64,
+    /// MIME of what was stored (image/jpeg, image/png, audio/webm, audio/ogg).
+    mime: String,
+}
+
+/// Send a media DM (image or voice). `kind` is "image" or "voice".
+#[tauri::command]
+async fn send_dm_media(
+    data_dir: String,
+    from_side: String,
+    kind: String,
+    media_b64: String,
+    state: State<'_, AppState>,
+) -> Result<MediaSendResp, String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(media_b64.as_bytes())
+        .map_err(|e| format!("media: bad base64: {e}"))?;
+    let (mime, direct_kind) = match kind.as_str() {
+        "image" => (
+            validate_image_bytes(&bytes)?,
+            sidevers_core::messages::direct::DirectKind::Image,
+        ),
+        "voice" => (
+            validate_voice_bytes(&bytes)?,
+            sidevers_core::messages::direct::DirectKind::Voice,
+        ),
+        other => return Err(format!("unknown media kind: {other}")),
+    };
+    let size = bytes.len() as u64;
+
+    let node = {
+        let g = state.node.lock().await;
+        g.as_ref()
+            .cloned()
+            .ok_or_else(|| "node not started".to_owned())?
+    };
+    let side_pk = decode_side_address(&from_side)?;
+    let side_arc = node
+        .side_by_address(&side_pk)
+        .await
+        .ok_or_else(|| "side not hosted on this node".to_owned())?;
+    let side_key = side_arc.keypair_arc();
+
+    // Put bytes in the local ObjectStore so the recipient can fetch
+    // by hash. The ObjectStore is shared across all sides on this
+    // node (single store per data_dir).
+    let dir = PathBuf::from(&data_dir);
+    let object_store = ObjectStore::open(&dir)
+        .await
+        .map_err(|e| format!("object store: {e}"))?;
+    let hash = object_store
+        .put(bytes)
+        .await
+        .map_err(|e| format!("object put: {e}"))?;
+
+    // Build a Reference + encode it as the DirectMessagePayload body.
+    let reference = Reference::new(hash, size, mime);
+    let body_bytes = reference.encode();
+    let payload = sidevers_core::messages::direct::DirectMessagePayload {
+        kind: direct_kind,
+        body: sidevers_core::messages::direct::DirectBody::ReferenceBytes(body_bytes),
+        reply_to: None,
+        thread: None,
+    };
+    let wire = payload.encode();
+
+    // Send via the existing send_dm helper. It expects the active
+    // session for `from_side` to be in AppState.sessions; the frontend
+    // ensures this by calling `connect_peer` before send.
+    let sg = state.sessions.lock().await;
+    let session = sg
+        .get(&from_side)
+        .ok_or_else(|| format!("no peer connected from side {from_side}"))?;
+    send_dm_helper(session, &side_key, &wire)
+        .await
+        .map_err(|e| format!("send_dm: {e}"))?;
+    Ok(MediaSendResp {
+        hash_hex: hex::encode(hash),
+        size,
+        mime: mime.to_owned(),
+    })
+}
+
+/// Fetch a media object from the local cache (or from `peer_listen_addr`
+/// if we don't have it yet). Returns the absolute path of the cached
+/// file; the frontend wraps it with `convertFileSrc` to load the
+/// bytes as an <img> or <audio> src.
+#[tauri::command]
+async fn fetch_media(
+    data_dir: String,
+    hash_hex: String,
+    peer_listen_addr: Option<String>,
+    from_side: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let mut hash = [0u8; 32];
+    let raw = hex::decode(hash_hex.trim()).map_err(|e| format!("bad hash hex: {e}"))?;
+    if raw.len() != 32 {
+        return Err("hash must be 32 bytes".into());
+    }
+    hash.copy_from_slice(&raw);
+
+    let dir = PathBuf::from(&data_dir);
+    let cache_dir = dir.join(MEDIA_CACHE_SUBDIR);
+    tokio::fs::create_dir_all(&cache_dir)
+        .await
+        .map_err(|e| format!("media cache dir: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&cache_dir)
+            .map_err(|e| e.to_string())?
+            .permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&cache_dir, perms).map_err(|e| e.to_string())?;
+    }
+    let cache_path = cache_dir.join(format!("{}.bin", hex::encode(hash)));
+
+    // Already cached?
+    if tokio::fs::try_exists(&cache_path)
+        .await
+        .map_err(|e| format!("stat: {e}"))?
+    {
+        return Ok(cache_path.to_string_lossy().into_owned());
+    }
+
+    // Try the local ObjectStore (we're the sender of this object).
+    let object_store = ObjectStore::open(&dir)
+        .await
+        .map_err(|e| format!("object store: {e}"))?;
+    if let Some(bytes) = object_store
+        .get(&hash)
+        .await
+        .map_err(|e| format!("object get: {e}"))?
+    {
+        tokio::fs::write(&cache_path, &bytes)
+            .await
+            .map_err(|e| format!("media cache write: {e}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&cache_path)
+                .map_err(|e| e.to_string())?
+                .permissions();
+            perms.set_mode(0o600);
+            std::fs::set_permissions(&cache_path, perms).map_err(|e| e.to_string())?;
+        }
+        return Ok(cache_path.to_string_lossy().into_owned());
+    }
+
+    // Else: fetch from peer over the network. Requires a session.
+    let node = {
+        let g = state.node.lock().await;
+        g.as_ref()
+            .cloned()
+            .ok_or_else(|| "node not started".to_owned())?
+    };
+    let dial = peer_listen_addr
+        .ok_or_else(|| "media not local; peer_listen_addr required".to_owned())?
+        .parse::<SocketAddr>()
+        .map_err(|e: std::net::AddrParseError| format!("bad dial_addr: {e}"))?;
+    let side_str = from_side
+        .ok_or_else(|| "media fetch needs a from_side to dial under".to_owned())?;
+    let side_pk = decode_side_address(&side_str)?;
+    let side_arc = node
+        .side_by_address(&side_pk)
+        .await
+        .ok_or_else(|| "side not hosted on this node".to_owned())?;
+    let side_key = side_arc.keypair_arc();
+    let session = node
+        .dial_from(&side_pk, dial, Intent::Storage)
+        .await
+        .map_err(|e| format!("dial storage: {e}"))?;
+    let bytes = fetch_object(&session, &side_key, &hash)
+        .await
+        .map_err(|e| format!("fetch object: {e}"))?
+        .ok_or_else(|| "peer reports object missing".to_owned())?;
+    tokio::fs::write(&cache_path, &bytes)
+        .await
+        .map_err(|e| format!("media cache write: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&cache_path)
+            .map_err(|e| e.to_string())?
+            .permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&cache_path, perms).map_err(|e| e.to_string())?;
+    }
+    Ok(cache_path.to_string_lossy().into_owned())
 }
 
 // ---------------------------------------------------------------------
@@ -2291,6 +2618,9 @@ fn main() {
             leave_group,
             list_group_members,
             generate_group_invite_svg,
+            // Phase 3 Stage D L4 — media messages (image + voice)
+            send_dm_media,
+            fetch_media,
             // Legacy key-only commands (offline tooling)
             generate_master,
             derive_side,

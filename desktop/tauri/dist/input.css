@@ -1302,4 +1302,124 @@
     align-items: center;
     flex-wrap: wrap;
   }
+
+  /* ---- Stage D L4: media compose + bubble ---- */
+  .sv-compose-icon-btn {
+    background: transparent;
+    color: var(--color-sv-text-muted);
+    border: 0;
+    padding: 0.3rem;
+    border-radius: 6px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    transition: background 0.12s ease, color 0.12s ease;
+  }
+  .sv-compose-icon-btn:hover {
+    background: var(--color-sv-hover-bg);
+    color: var(--color-sv-text);
+    opacity: 1;
+  }
+  .sv-compose-icon-btn:focus-visible {
+    outline: 2px solid var(--color-sv-text);
+    outline-offset: 1px;
+  }
+  .sv-compose-icon-btn svg {
+    width: 20px;
+    height: 20px;
+    stroke: currentColor;
+    fill: none;
+  }
+  .sv-compose-recording {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin-top: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    background: var(--color-sv-surface);
+    border: 1px solid var(--color-sv-border);
+    border-radius: 8px;
+    font-size: 0.82rem;
+    color: var(--color-sv-text);
+  }
+  .sv-recording-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #ff453a;
+    animation: sv-recording-pulse 1.2s ease-in-out infinite;
+    flex: 0 0 auto;
+  }
+  @keyframes sv-recording-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+  }
+  .sv-recording-time {
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--color-sv-text-strong);
+  }
+  .sv-recording-hint {
+    color: var(--color-sv-text-muted);
+    margin-inline-end: auto;
+  }
+  .sv-compose-recording button {
+    padding: 0.3rem 0.7rem;
+    font-size: 0.78rem;
+  }
+
+  /* Image + audio in message bubbles. */
+  .sv-msg-image {
+    max-width: 320px;
+    max-height: 320px;
+    border-radius: 8px;
+    display: block;
+    background: var(--color-sv-surface);
+    cursor: zoom-in;
+    border: 1px solid var(--color-sv-border);
+  }
+  .sv-msg-image.loading {
+    width: 240px;
+    height: 180px;
+    cursor: default;
+  }
+  .sv-msg-audio {
+    width: 100%;
+    max-width: 320px;
+    height: 36px;
+  }
+  .sv-msg-media-loading {
+    color: var(--color-sv-text-muted);
+    font-size: 0.78rem;
+    font-style: italic;
+  }
+  .sv-msg-media-error {
+    color: #d70015;
+    font-size: 0.78rem;
+  }
+
+  /* Fullscreen image viewer (click image to open). */
+  .sv-image-modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.88);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1100;
+    cursor: zoom-out;
+    padding: 2rem;
+  }
+  .sv-image-modal[hidden] {
+    display: none;
+  }
+  .sv-image-modal img {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+    border-radius: 4px;
+  }
 }

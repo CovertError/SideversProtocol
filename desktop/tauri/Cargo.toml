@@ -31,6 +31,7 @@ directories = "5.0"
 unicode-normalization = "0.1"
 sidevers-core = { path = "../../crates/sidevers-core" }
 sidevers-net = { path = "../../crates/sidevers-net" }
+sidevers-storage = { path = "../../crates/sidevers-storage" }
 
 [dev-dependencies]
 tempfile = "3"
