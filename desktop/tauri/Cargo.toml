@@ -26,6 +26,7 @@ serde_json = "1"
 hex = "0.4"
 tokio = { version = "1", features = ["full"] }
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+directories = "5.0"
 sidevers-core = { path = "../../crates/sidevers-core" }
 sidevers-net = { path = "../../crates/sidevers-net" }
 

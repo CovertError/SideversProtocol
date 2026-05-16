@@ -17,6 +17,130 @@
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
+    <!--
+      Phase 3.D — first-run onboarding wizard. Hidden by default;
+      onboarding.js reveals it on load if `is_onboarded` returns false
+      for the default data dir. Five steps stacked as sections; the
+      stepper hides all but the active one.
+    -->
+    <div id="onboarding" class="onboarding" hidden>
+      <div class="onboarding-card">
+        <img src="logo.png" alt="Sidevers" class="onboarding-logo" />
+        <ol class="onboarding-stepper" id="onboarding-stepper">
+          <li class="onboarding-step active" data-step="1">1</li>
+          <li class="onboarding-step" data-step="2">2</li>
+          <li class="onboarding-step" data-step="3">3</li>
+          <li class="onboarding-step" data-step="4">4</li>
+          <li class="onboarding-step" data-step="5">5</li>
+        </ol>
+
+        <section class="onboarding-screen" data-screen="1">
+          <h1 data-i18n="onboard.welcome.h">Welcome to Sidevers</h1>
+          <p data-i18n="onboard.welcome.body">
+            Sidevers is a peer-to-peer protocol for talking to the people
+            you've chosen to talk to, without a server in the middle. Each
+            identity you create here is a self-sovereign "side" — your
+            keys, your data, your reach.
+          </p>
+          <p data-i18n="onboard.welcome.next">
+            We'll walk through four steps: pick where Sidevers stores
+            your data, create your first side, back up its key, and
+            then you're done.
+          </p>
+          <div class="onboarding-actions">
+            <button id="ob-next-1" data-i18n="btn.next">Next</button>
+          </div>
+        </section>
+
+        <section class="onboarding-screen" data-screen="2" hidden>
+          <h1 data-i18n="onboard.dir.h">Pick a data directory</h1>
+          <p data-i18n="onboard.dir.body">
+            Sidevers persists your keys, your inbox, and your peer table
+            here. The default is OS-appropriate. Make sure it's
+            somewhere your OS-level disk encryption covers.
+          </p>
+          <div class="row">
+            <input
+              id="ob-data-dir"
+              type="text"
+              spellcheck="false"
+              data-i18n-placeholder="onboard.dir.placeholder"
+            />
+          </div>
+          <div class="onboarding-actions">
+            <button id="ob-back-2" class="secondary" data-i18n="btn.back">Back</button>
+            <button id="ob-next-2" data-i18n="btn.next">Next</button>
+          </div>
+        </section>
+
+        <section class="onboarding-screen" data-screen="3" hidden>
+          <h1 data-i18n="onboard.side.h">Create your first side</h1>
+          <p data-i18n="onboard.side.body">
+            A "side" is an identity — call it whatever fits the
+            context. Common labels are <code>work</code>,
+            <code>private</code>, <code>public</code>, <code>close</code>.
+            You can add more sides later from the main UI.
+          </p>
+          <div class="row">
+            <input
+              id="ob-side-label"
+              type="text"
+              spellcheck="false"
+              value="work"
+            />
+          </div>
+          <pre id="ob-side-error" class="error" role="alert"></pre>
+          <div class="onboarding-actions">
+            <button id="ob-back-3" class="secondary" data-i18n="btn.back">Back</button>
+            <button id="ob-next-3" data-i18n="btn.create_side">Create side</button>
+          </div>
+        </section>
+
+        <section class="onboarding-screen" data-screen="4" hidden>
+          <h1 data-i18n="onboard.backup.h">Back up your seed</h1>
+          <p data-i18n="onboard.backup.warn">
+            <strong>This is the only copy of your private key.</strong>
+            If you lose it and never paired another device, your
+            identity is gone — there's no recovery service. Save the
+            file somewhere safe (a USB stick or encrypted vault, not
+            cloud-sync).
+          </p>
+          <div class="row">
+            <input
+              id="ob-backup-path"
+              type="text"
+              spellcheck="false"
+              data-i18n-placeholder="onboard.backup.path_placeholder"
+            />
+            <button id="ob-save-seed" data-i18n="btn.save_seed">
+              Save seed file
+            </button>
+          </div>
+          <pre id="ob-backup-error" class="error" role="alert"></pre>
+          <div class="onboarding-actions">
+            <button id="ob-back-4" class="secondary" data-i18n="btn.back">Back</button>
+            <button id="ob-next-4" disabled data-i18n="btn.next">Next</button>
+          </div>
+        </section>
+
+        <section class="onboarding-screen" data-screen="5" hidden>
+          <h1 data-i18n="onboard.done.h">You're set up</h1>
+          <p data-i18n="onboard.done.body">
+            Your side address is below. Hand it to someone you'd like
+            to message, or pair your phone with this device from the
+            main UI to host the same identity in two places.
+          </p>
+          <div class="row">
+            <label class="label" data-i18n="onboard.done.address">Your address</label>
+            <input id="ob-final-address" type="text" spellcheck="false" readonly />
+          </div>
+          <div class="onboarding-actions">
+            <button id="ob-finish" data-i18n="btn.finish">Open Sidevers</button>
+          </div>
+        </section>
+      </div>
+    </div>
+
     <header class="topbar">
       <img src="logo.png" alt="Sidevers" class="logo" />
       <div class="topbar-right">
@@ -167,8 +291,11 @@
     <!-- Phase 3.H: i18n shim loads as a module so it can fetch JSON
          bundles + own its own state. main.js is plain-script for
          simplicity; it talks to i18n.js via window.__sv_i18n set by
-         the module. -->
+         the module. Phase 3.D onboarding.js sits between them: it
+         checks is_onboarded() on load and either shows the wizard or
+         hides #onboarding so main.js renders the regular UI. -->
     <script type="module" src="i18n.js"></script>
+    <script src="onboarding.js"></script>
     <script src="main.js"></script>
   </body>
 </html>

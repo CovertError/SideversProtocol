@@ -32,9 +32,15 @@ use sidevers_core::keys::{MasterKey, SECRET_KEY_LEN, SideKey};
 use sidevers_core::messages::direct::{DirectBody, DirectKind, DirectMessagePayload};
 use sidevers_core::payload as core_payload;
 use sidevers_core::{Address, AddressKind, Envelope, MessageType, PairingQr};
-use sidevers_net::{InboxEntry, InboxStore, Intent, Node, Session, send_dm as send_dm_helper};
+use sidevers_net::{
+    InboxEntry, InboxStore, Intent, Node, Session, SideStore, send_dm as send_dm_helper,
+};
 use tauri::{Emitter, State};
 use tokio::sync::Mutex;
+
+/// Key used in the SideStore `settings` table to gate the onboarding
+/// wizard. Set to "true" once the first-run flow completes.
+const SETTING_ONBOARDING_COMPLETED: &str = "onboarding_completed";
 
 // ---------------------------------------------------------------------
 // Helpers
@@ -91,6 +97,86 @@ struct InboxDm {
     from: String,
     to: String,
     plaintext: String,
+}
+
+// ---------------------------------------------------------------------
+// Phase 3.D — onboarding wizard support
+// ---------------------------------------------------------------------
+
+/// Default per-OS data dir for a fresh install. The wizard pre-fills
+/// the field with this; users can override.
+#[tauri::command]
+fn default_data_dir() -> Result<String, String> {
+    let base = directories::ProjectDirs::from("com", "sidevers", "Sidevers")
+        .ok_or_else(|| "no project dir available on this platform".to_owned())?;
+    Ok(base.data_dir().to_string_lossy().into_owned())
+}
+
+/// True iff the named data dir's `sides.db` already records the
+/// onboarding flag. Used by the frontend on load: if false → show
+/// the wizard; if true → load the main UI.
+#[tauri::command]
+async fn is_onboarded(data_dir: String) -> Result<bool, String> {
+    let dir = PathBuf::from(&data_dir);
+    if !dir.join("sides.db").exists() {
+        return Ok(false);
+    }
+    let store = SideStore::open(&dir)
+        .await
+        .map_err(|e| format!("opening side store: {e}"))?;
+    let v = store
+        .get_setting(SETTING_ONBOARDING_COMPLETED)
+        .await
+        .map_err(|e| format!("read setting: {e}"))?;
+    Ok(v.as_deref() == Some("true"))
+}
+
+/// Flip the onboarding flag in the data dir's settings table. Called
+/// by the wizard's final step before transitioning to the main UI.
+#[tauri::command]
+async fn complete_onboarding(data_dir: String) -> Result<(), String> {
+    let dir = PathBuf::from(&data_dir);
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| format!("data_dir: {e}"))?;
+    let store = SideStore::open(&dir)
+        .await
+        .map_err(|e| format!("opening side store: {e}"))?;
+    store
+        .set_setting(SETTING_ONBOARDING_COMPLETED, "true")
+        .await
+        .map_err(|e| format!("write setting: {e}"))?;
+    Ok(())
+}
+
+/// Write the active node's primary side seed to a user-chosen path,
+/// chmod 0o600. The wizard's "Backup seed" step calls this once.
+#[tauri::command]
+async fn write_seed_backup(
+    out_path: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let node = {
+        let g = state.node.lock().await;
+        g.as_ref()
+            .cloned()
+            .ok_or_else(|| "node not started — backup must run after start_node".to_owned())?
+    };
+    let seed = node.side().to_seed();
+    let path = PathBuf::from(out_path);
+    tokio::fs::write(&path, &seed)
+        .await
+        .map_err(|e| format!("writing seed file: {e}"))?;
+    // Owner-only — matches the CLI's write_secret pattern.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+        let mut perms = meta.permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&path, perms).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------
@@ -590,6 +676,11 @@ fn main() {
             add_side,
             retire_side_cmd,
             load_inbox_history,
+            // Phase 3.D onboarding wizard
+            default_data_dir,
+            is_onboarded,
+            complete_onboarding,
+            write_seed_backup,
             // Multi-device pairing (Phase 3.C)
             generate_pairing_qr_svg,
             accept_pairing_qr,

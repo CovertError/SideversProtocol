@@ -31,7 +31,9 @@ use crate::relationships::SideRelationship;
 ///      relationships, co_holders, revoked_devices.
 /// v2 — Phase 1.5g: adds co_holder_addrs (per-side device → dial address)
 ///      to support live state delta push between co-holders.
-pub const SCHEMA_VERSION: i64 = 2;
+/// v3 — Phase 3.D: adds `settings` (key, value) table for small
+///      durable preferences (onboarding_completed, active_side, etc).
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Newline character used to separate capability tokens in the
 /// relationships.capabilities TEXT column. Capability tokens are
@@ -101,6 +103,7 @@ impl SideStore {
                 // Fresh DB → install the latest schema in one shot.
                 conn.execute_batch(SCHEMA_V1).map_err(map_sqlite)?;
                 conn.execute_batch(SCHEMA_V2_DELTA).map_err(map_sqlite)?;
+                conn.execute_batch(SCHEMA_V3_DELTA).map_err(map_sqlite)?;
                 conn.execute(
                     "INSERT INTO schema_version (version) VALUES (?1)",
                     params![SCHEMA_VERSION],
@@ -108,8 +111,16 @@ impl SideStore {
                 .map_err(map_sqlite)?;
             }
             Some(v) if v < 2 => {
-                // Existing v1 DB → apply v2 migration.
                 conn.execute_batch(SCHEMA_V2_DELTA).map_err(map_sqlite)?;
+                conn.execute_batch(SCHEMA_V3_DELTA).map_err(map_sqlite)?;
+                conn.execute(
+                    "UPDATE schema_version SET version = ?1",
+                    params![SCHEMA_VERSION],
+                )
+                .map_err(map_sqlite)?;
+            }
+            Some(v) if v < 3 => {
+                conn.execute_batch(SCHEMA_V3_DELTA).map_err(map_sqlite)?;
                 conn.execute(
                     "UPDATE schema_version SET version = ?1",
                     params![SCHEMA_VERSION],
@@ -120,6 +131,37 @@ impl SideStore {
                 // Already at current version (or higher).
             }
         }
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------
+    // `settings` table (Phase 3.D — durable preferences)
+    // ---------------------------------------------------------------
+
+    /// Read a single setting by `key`. Returns `None` if absent.
+    pub async fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().await;
+        let val: Option<String> = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(map_sqlite)?;
+        Ok(val)
+    }
+
+    /// Insert or replace a setting. Settings round-trip as opaque text
+    /// (JSON / hex / plain string — caller's choice).
+    pub async fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )
+        .map_err(map_sqlite)?;
         Ok(())
     }
 
@@ -651,6 +693,17 @@ CREATE TABLE IF NOT EXISTS co_holder_addrs (
 );
 "#;
 
+/// v2 → v3 migration (Phase 3.D): small (key, value) `settings` table.
+/// Used for durable preferences that don't fit any other table —
+/// onboarding_completed, last-active-side, theme preference, etc.
+/// Values are opaque text; callers serialize/deserialize as needed.
+const SCHEMA_V3_DELTA: &str = r#"
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY NOT NULL,
+    value TEXT NOT NULL
+);
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -687,6 +740,35 @@ mod tests {
         store.upsert_side(&side).await.unwrap();
         let got = store.load_side(&[0x11; 32]).await.unwrap().unwrap();
         assert_eq!(got, side);
+    }
+
+    #[tokio::test]
+    async fn settings_round_trip() {
+        let store = SideStore::open_memory().await.unwrap();
+        assert!(
+            store
+                .get_setting("onboarding_completed")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        store
+            .set_setting("onboarding_completed", "true")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get_setting("onboarding_completed").await.unwrap(),
+            Some("true".to_owned())
+        );
+        // Overwrite.
+        store
+            .set_setting("onboarding_completed", "false")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get_setting("onboarding_completed").await.unwrap(),
+            Some("false".to_owned())
+        );
     }
 
     #[tokio::test]

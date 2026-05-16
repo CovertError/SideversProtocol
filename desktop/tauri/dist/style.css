@@ -2,6 +2,113 @@
    Sidevers brand-docs (no blues, no accents).
    Brand tokens come from brand-colors.css. */
 
+/* Phase 3.D — onboarding wizard. Fullscreen overlay; brand-grounded
+   single card centered. Hidden by default — onboarding.js reveals
+   it if SideStore.settings doesn't have onboarding_completed=true. */
+.onboarding {
+  position: fixed;
+  inset: 0;
+  background: var(--sv-background);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+  overflow-y: auto;
+}
+
+.onboarding-card {
+  width: 100%;
+  max-width: 620px;
+  background: var(--sv-surface);
+  border: 1px solid var(--sv-border);
+  border-radius: 10px;
+  padding: 2.5rem 2.5rem 2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.onboarding-logo {
+  height: 36px;
+  width: auto;
+  align-self: flex-start;
+  margin-bottom: 0.5rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  .onboarding-logo {
+    filter: invert(1);
+  }
+}
+
+.onboarding-stepper {
+  list-style: none;
+  margin: 0 0 0.5rem;
+  padding: 0;
+  display: flex;
+  gap: 0.5rem;
+}
+
+.onboarding-step {
+  width: 28px;
+  height: 28px;
+  border-radius: 14px;
+  border: 1px solid var(--sv-border);
+  font-size: 0.78rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--sv-text-muted);
+  font-family: "Geist Mono", ui-monospace, monospace;
+}
+
+.onboarding-step.active {
+  border-color: var(--sv-text);
+  color: var(--sv-text);
+  background: var(--sv-background);
+}
+
+.onboarding-step.done {
+  border-color: var(--sv-text);
+  background: var(--sv-text);
+  color: var(--sv-background);
+}
+
+.onboarding-screen h1 {
+  margin: 0;
+  font-size: 1.4rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.onboarding-screen p {
+  margin: 0;
+  color: var(--sv-text-muted);
+  line-height: 1.55;
+}
+
+.onboarding-screen p code {
+  font-family: "Geist Mono", ui-monospace, monospace;
+  font-size: 0.85rem;
+  background: var(--sv-background);
+  padding: 0.05rem 0.25rem;
+  border-radius: 3px;
+  border: 1px solid var(--sv-border);
+}
+
+.onboarding-screen p strong {
+  color: var(--sv-text);
+  font-weight: 600;
+}
+
+.onboarding-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
 /* Phase 3.J: local @font-face declarations. Files MUST be placed under
    `dist/fonts/` for branded typography to render — see fonts/README.md.
    If files are absent, browsers fall through to the font-family stack
