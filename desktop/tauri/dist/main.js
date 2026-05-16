@@ -53,6 +53,17 @@ const state = {
   // represented by the Home button at the top of the rail. Friends
   // and 1:1 DMs live here. Stage D L1.5.
   personalSideAddress: null,
+  // Stage D L2b: groups (verses) the user belongs to. Each rail
+  // avatar below Home represents one entry. populated by list_groups.
+  // groups : Array<GroupView>
+  groups: [],
+  // groupChats : Map<verse_address, Array<{from, plaintext, received_at, kind}>>
+  // Filled by verse:post events; each entry is a decrypted group post.
+  groupChats: new Map(),
+  // activeGroup : GroupView | null — the currently-open group, if any.
+  // When set, the compose box posts to this group and the thread
+  // view renders groupChats.get(verse_address) instead of DMs.
+  activeGroup: null,
   view: { name: "welcome", params: {} },
   // Add-friend tab state
   addFriendTab: "share",
@@ -305,6 +316,7 @@ window.svBoot = async function svBoot(nodeInfo, dataDir) {
 
   await refreshSides();
   await ensurePersonalSideAddress();
+  await refreshGroups();
   // Best-effort prefetch of every side's photo so rail + inside-header
   // paint with the right avatar on the first render.
   await Promise.all(state.sides.map((s) => refreshSidePhoto(s.side_address)));
@@ -318,8 +330,46 @@ window.svBoot = async function svBoot(nodeInfo, dataDir) {
   // Subscribe to inbox events.
   if (listen) {
     listen("inbox:dm", (e) => onInboxDm(e?.payload));
+    listen("verse:post", (e) => onVersePost(e?.payload));
   }
 };
+
+async function refreshGroups() {
+  if (!state.dataDir) {
+    state.groups = [];
+    return;
+  }
+  try {
+    state.groups = await call("list_groups", { dataDir: state.dataDir });
+  } catch (e) {
+    console.warn("list_groups failed:", e);
+    state.groups = [];
+  }
+}
+
+function onVersePost(payload) {
+  if (!payload || !payload.verse) return;
+  const verse = payload.verse;
+  if (!state.groupChats.has(verse)) state.groupChats.set(verse, []);
+  state.groupChats.get(verse).push({
+    from: payload.from,
+    plaintext: payload.plaintext,
+    received_at: payload.received_at,
+    // Distinguish our own outgoing posts from received ones by
+    // comparing `from` against the active group's member-side.
+    kind:
+      state.activeGroup &&
+      state.activeGroup.verse_address === verse &&
+      payload.from === state.activeGroup.member_side_address
+        ? "out"
+        : "in",
+  });
+  // If the user is looking at this group right now, repaint the thread.
+  if (state.activeGroup && state.activeGroup.verse_address === verse) {
+    renderView();
+  }
+  renderRail();
+}
 
 // =====================================================================
 // Settings (persisted via SideStore.settings)
@@ -439,7 +489,10 @@ function renderRail() {
     homeBtn.className = "sv-rail-btn";
     homeBtn.setAttribute("aria-label", t("rail.home_aria") || "Home");
     homeBtn.title = t("rail.home_title") || "Home — friends and DMs";
-    if (state.activeSide === state.personalSideAddress) {
+    if (
+      !state.activeGroup &&
+      state.activeSide === state.personalSideAddress
+    ) {
       homeBtn.setAttribute("data-active", "true");
     }
     homeBtn.innerHTML =
@@ -447,17 +500,55 @@ function renderRail() {
       '<path stroke-linecap="round" stroke-linejoin="round" ' +
       'd="m2.25 12 8.954-8.955c.44-.439 1.152-.439 1.591 0L21.75 12M4.5 9.75v10.125c0 .621.504 1.125 1.125 1.125H9.75v-4.875c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21h4.125c.621 0 1.125-.504 1.125-1.125V9.75M8.25 21h8.25"/>' +
       "</svg>";
-    homeBtn.onclick = () => setActiveSide(state.personalSideAddress);
+    homeBtn.onclick = () => {
+      // Clear any group context so the in-side column flips back to
+      // Friends + Chats.
+      state.activeGroup = null;
+      setActiveSide(state.personalSideAddress);
+    };
     homeLi.appendChild(homeBtn);
     ul.appendChild(homeLi);
   }
 
-  // ---- Group + extra sides (everything that is NOT the personal side) ----
-  // Hide retired sides too — the Rust side keeps them hosted (lifecycle:
-  // Retired) so in-flight replies still arrive, but they shouldn't
-  // appear as a switchable identity.
+  // ---- Group avatars (Stage D L2b) ----
+  // Each group surfaces as an avatar between Home and the rail's
+  // action buttons. Clicking switches activeSide to the group's
+  // member-side AND sets state.activeGroup so the thread view
+  // renders group posts instead of DMs.
+  const groupMemberSides = new Set(
+    state.groups.map((g) => g.member_side_address),
+  );
+  for (const group of state.groups) {
+    const li = document.createElement("li");
+    const btn = document.createElement("button");
+    btn.className = "sv-rail-btn";
+    const label = group.name || shortenAddr(group.verse_address);
+    btn.setAttribute("aria-label", label);
+    btn.title = label;
+    if (
+      state.activeGroup &&
+      state.activeGroup.verse_address === group.verse_address
+    ) {
+      btn.setAttribute("data-active", "true");
+    }
+    const av = document.createElement("span");
+    av.className = "sv-avatar sv-rail-avatar";
+    applyAvatar(av, group.verse_address, label);
+    btn.appendChild(av);
+    btn.onclick = () => openGroup(group);
+    li.appendChild(btn);
+    ul.appendChild(li);
+  }
+
+  // ---- Standalone non-personal, non-group sides ----
+  // Rare today (Stage D's create_group covers the common "extra side"
+  // case). Kept so power users who minted standalone sides via add_side
+  // before groups landed still see them. Hide retired sides too.
   const visible = state.sides.filter(
-    (s) => !s.is_retired && s.side_address !== state.personalSideAddress,
+    (s) =>
+      !s.is_retired &&
+      s.side_address !== state.personalSideAddress &&
+      !groupMemberSides.has(s.side_address),
   );
   for (const s of visible) {
     const li = document.createElement("li");
@@ -465,7 +556,9 @@ function renderRail() {
     btn.className = "sv-rail-btn";
     btn.setAttribute("aria-label", sideLabel(s.side_address) || s.side_address);
     btn.title = sideLabel(s.side_address) || s.side_address;
-    if (s.side_address === state.activeSide) btn.setAttribute("data-active", "true");
+    if (s.side_address === state.activeSide && !state.activeGroup) {
+      btn.setAttribute("data-active", "true");
+    }
 
     const av = document.createElement("span");
     av.className = "sv-avatar sv-rail-avatar";
@@ -476,6 +569,20 @@ function renderRail() {
     li.appendChild(btn);
     ul.appendChild(li);
   }
+}
+
+/// Switch the rail's selected context to a group. Sets activeGroup +
+/// activeSide (the group's member-side), opens the group thread.
+function openGroup(group) {
+  state.activeGroup = group;
+  state.activeSide = group.member_side_address;
+  state.view = {
+    name: "group-thread",
+    params: { verse: group.verse_address },
+  };
+  renderRail();
+  renderInside();
+  renderView();
 }
 
 async function setActiveSide(addr) {
@@ -531,6 +638,35 @@ function renderInside() {
     }
     renderFriendsList([]);
     renderChatsList([]);
+    return;
+  }
+
+  // Stage D L2b: when a group is active, the in-side column shows
+  // group framing — header is the group's name + role, and the
+  // Friends/Chats lists are replaced with a single "this is a group"
+  // hint. (Full member list + per-message list will land in L3.)
+  if (state.activeGroup) {
+    const g = state.activeGroup;
+    if (titleEl) titleEl.textContent = g.name || shortenAddr(g.verse_address);
+    if (avatarEl) applyAvatar(avatarEl, g.verse_address, g.name || "");
+    if (statsEl) {
+      statsEl.textContent =
+        g.role === "moderator"
+          ? t("inside.group_role_moderator") || "Group · you moderate"
+          : t("inside.group_role_member") || "Group · member";
+    }
+    const friendsUl = $("friends-list");
+    if (friendsUl) {
+      friendsUl.innerHTML = "";
+      const li = document.createElement("li");
+      li.className = "sv-inside-section-empty";
+      li.textContent =
+        t("inside.group_hint") ||
+        "Group chat is open in the main pane. Share the invite link from settings to add people.";
+      friendsUl.appendChild(li);
+    }
+    const chatsUl = $("chats-list");
+    if (chatsUl) chatsUl.innerHTML = "";
     return;
   }
 
@@ -728,6 +864,10 @@ function renderView() {
   const viewMap = {
     welcome: renderWelcome,
     thread: renderThread,
+    // Stage D L2b: group chat reuses the thread view shell — same
+    // HTML, different data source (groupChats vs DMs) and different
+    // send path (post_to_group vs send_dm_live).
+    "group-thread": renderGroupThread,
     friend: renderFriend,
     "add-friend": renderAddFriend,
     "side-settings": renderSideSettings,
@@ -735,10 +875,101 @@ function renderView() {
     advanced: renderAdvanced,
   };
   for (const el of document.querySelectorAll("[data-view]")) {
-    el.hidden = el.dataset.view !== state.view.name;
+    // group-thread is rendered into the same DOM as data-view="thread".
+    const matchName =
+      state.view.name === "group-thread" ? "thread" : state.view.name;
+    el.hidden = el.dataset.view !== matchName;
   }
   const fn = viewMap[state.view.name];
   if (fn) fn(state.view.params);
+}
+
+function renderGroupThread(params) {
+  const verse = params?.verse;
+  if (!verse || !state.activeGroup) return;
+  const group = state.activeGroup;
+
+  const nameEl = $("thread-name");
+  const subEl = $("thread-sub");
+  const avEl = $("thread-avatar");
+  if (nameEl) nameEl.textContent = group.name || shortenAddr(verse);
+  if (avEl) applyAvatar(avEl, verse, group.name || "");
+  if (subEl) {
+    const msgs = state.groupChats.get(verse) || [];
+    subEl.textContent =
+      group.role === "moderator"
+        ? `Group · you moderate`
+        : `Group · ${msgs.length} message${msgs.length === 1 ? "" : "s"}`;
+  }
+  // The "View profile" button only makes sense for 1:1 chats. Hide
+  // it on group views; could later become "View group settings".
+  const profileBtn = $("thread-view-profile");
+  if (profileBtn) profileBtn.hidden = true;
+
+  const list = $("thread-list");
+  if (!list) return;
+  list.innerHTML = "";
+
+  const msgs = state.groupChats.get(verse) || [];
+  if (msgs.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "sv-empty";
+    const p = document.createElement("p");
+    p.textContent = t("thread.empty");
+    empty.appendChild(p);
+    list.appendChild(empty);
+    return;
+  }
+
+  const GROUP_WINDOW_S = 300;
+  let prevFrom = null;
+  let prevTs = 0;
+  for (const m of msgs) {
+    const sameAuthor = m.from === prevFrom;
+    const closeInTime = m.received_at - prevTs <= GROUP_WINDOW_S;
+    const grouped = sameAuthor && closeInTime;
+    const row = document.createElement("div");
+    row.className = "sv-msg" + (grouped ? " sv-msg-grouped" : "");
+    const slot = document.createElement("div");
+    slot.className = "sv-msg-avatar-slot";
+    if (!grouped) {
+      const author = m.from;
+      const av = document.createElement("span");
+      av.className = "sv-avatar sv-avatar-sm";
+      const label =
+        m.kind === "out"
+          ? group.name || ""
+          : shortenAddr(m.from);
+      applyAvatar(av, author, label);
+      slot.appendChild(av);
+    }
+    row.appendChild(slot);
+    const content = document.createElement("div");
+    content.className = "sv-msg-content";
+    if (!grouped) {
+      const header = document.createElement("div");
+      header.className = "sv-msg-header";
+      const nameEl2 = document.createElement("span");
+      nameEl2.className = "sv-msg-name";
+      nameEl2.textContent =
+        m.kind === "out" ? t("msg.you") : shortenAddr(m.from);
+      const timeEl = document.createElement("span");
+      timeEl.className = "sv-msg-time";
+      timeEl.textContent = relativeTime(m.received_at);
+      header.appendChild(nameEl2);
+      header.appendChild(timeEl);
+      content.appendChild(header);
+    }
+    const body = document.createElement("div");
+    body.className = "sv-msg-body";
+    body.textContent = m.plaintext;
+    content.appendChild(body);
+    row.appendChild(content);
+    list.appendChild(row);
+    prevFrom = m.from;
+    prevTs = m.received_at;
+  }
+  list.scrollTop = list.scrollHeight;
 }
 
 function renderWelcome() {
@@ -931,12 +1162,38 @@ async function ensureSessionFor(side, peer) {
 }
 
 async function sendCurrentThread() {
-  const peer = state.view?.params?.peer;
-  if (!peer || !state.activeSide) return;
   const input = $("compose-text");
   if (!input) return;
   const text = input.value;
   if (!text || !text.trim()) return;
+
+  // Stage D L2b: branch on whether we're in a group or a 1:1 chat.
+  if (state.activeGroup) {
+    const group = state.activeGroup;
+    await call("post_to_group", {
+      dataDir: state.dataDir,
+      memberSideAddress: group.member_side_address,
+      text,
+    });
+    // Mirror locally so the bubble shows immediately. Mark from =
+    // our member-side so the renderGroupThread "you" check works.
+    const now = Math.floor(Date.now() / 1000);
+    if (!state.groupChats.has(group.verse_address))
+      state.groupChats.set(group.verse_address, []);
+    state.groupChats.get(group.verse_address).push({
+      from: group.member_side_address,
+      plaintext: text,
+      received_at: now,
+      kind: "out",
+    });
+    input.value = "";
+    renderInside();
+    renderView();
+    return;
+  }
+
+  const peer = state.view?.params?.peer;
+  if (!peer || !state.activeSide) return;
   // Ensure session.
   const key = sessionKey(state.activeSide, peer);
   const sess = state.sessions.get(key);
@@ -1201,23 +1458,51 @@ async function loadInboxHistory(side) {
 
 function attachStaticHandlers() {
   // Rail bottom actions.
+  // Stage D L2b: the rail "+" now creates a group (the primary
+  // surface). Power users who want a standalone non-group side can
+  // still get one via Advanced (not surfaced in this MVP).
   $("rail-add-side")?.addEventListener("click", () =>
     safe(async () => {
       const raw = await window.svPrompt(
-        "Label for the new side (e.g. work, private, public).",
-        "extra",
-        { title: "New side", okLabel: "Create" },
+        t("create_group.prompt") ||
+          "Group name — what should this space be called?",
+        "",
+        {
+          title: t("create_group.title") || "Create a group",
+          okLabel: t("btn.create_group") || "Create",
+        },
       );
       if (raw == null) return;
       const trimmed = String(raw).trim();
       if (!trimmed) return;
-      const resp = await call("add_side", { label: trimmed });
-      state.sideLabels.set(resp.side_address, trimmed);
+      const resp = await call("create_group", {
+        dataDir: state.dataDir,
+        name: trimmed,
+      });
+      state.sideLabels.set(resp.member_side_address, trimmed);
       await refreshSides();
+      await refreshGroups();
       renderRail();
-      // Switch to it.
-      await setActiveSide(resp.side_address);
-      showOk(`side added (${trimmed})`);
+      // Switch into the new group.
+      const created = state.groups.find(
+        (g) => g.verse_address === resp.verse_address,
+      );
+      if (created) openGroup(created);
+      // Show the freshly-minted invite link so the user can copy it
+      // to share. The Add-friend "Share me" tab is the natural place
+      // — but for groups we should land in the group + a small toast.
+      try {
+        await navigator.clipboard.writeText(resp.group_invite_uri);
+        showOk(
+          t("toast.group_created_copied") ||
+            "Group created · invite link copied to clipboard",
+        );
+      } catch {
+        showOk(
+          t("toast.group_created") ||
+            "Group created · share its invite link from settings",
+        );
+      }
     }),
   );
   $("rail-settings")?.addEventListener("click", () => showView("settings"));
@@ -1353,22 +1638,53 @@ function attachStaticHandlers() {
   );
   $("contact-paste-accept")?.addEventListener("click", () =>
     safe(async () => {
-      if (!state.activeSide) throw new Error(t("toast.no_side"));
       const uri = $("contact-paste-uri").value.trim();
       if (!uri) throw new Error("paste a friend code first");
+
+      // Stage D L2b: dispatch by URI prefix. Group invites and
+      // friend invites share a single paste field but route to
+      // different commands.
+      if (uri.startsWith("sidevers-group:")) {
+        const resp = await call("join_group_by_invite", {
+          dataDir: state.dataDir,
+          qrUri: uri,
+        });
+        $("contact-paste-uri").value = "";
+        await refreshSides();
+        await refreshGroups();
+        if (resp.name) state.sideLabels.set(resp.member_side_address, resp.name);
+        renderRail();
+        // Land in the new group.
+        const joined = state.groups.find(
+          (g) => g.verse_address === resp.verse_address,
+        );
+        if (joined) openGroup(joined);
+        showOk(
+          t("toast.group_joined", { name: resp.name || "group" }) ||
+            `Joined ${resp.name || "group"}`,
+        );
+        return;
+      }
+
+      // Default: friend (contact) code.
+      if (!state.personalSideAddress)
+        throw new Error("personal side missing");
       const resp = await call("accept_contact_qr", {
-        sideAddress: state.activeSide,
+        sideAddress: state.personalSideAddress,
         qrUri: uri,
       });
       $("contact-paste-uri").value = "";
-      await refreshFriends(state.activeSide);
+      await refreshFriends(state.personalSideAddress);
       renderInside();
       showOk(
         t("toast.friend_added", {
           name: resp.display_name || shortenAddr(resp.friend_address),
         }),
       );
-      // Drop into the new chat thread.
+      // Drop into the new chat thread. Switch to Home first so
+      // friends list is the active context.
+      state.activeGroup = null;
+      state.activeSide = state.personalSideAddress;
       showView("thread", { peer: resp.friend_address });
     }),
   );

@@ -115,6 +115,21 @@ struct InboxDm {
     received_at: u64,
 }
 
+/// Stage D L2b: a decrypted verse post surfaced to the frontend as
+/// a `verse:post` Tauri event. The frontend matches `verse` to the
+/// active group and appends to the in-memory chat list.
+#[derive(Serialize, Clone)]
+struct VersePostEvent {
+    /// Bech32 sv1q address of the verse.
+    verse: String,
+    /// Bech32 sv1q address of the post author's side.
+    from: String,
+    /// UTF-8 message body. Group posts that aren't valid UTF-8
+    /// surface here lossy — Stage D ships text posts only.
+    plaintext: String,
+    received_at: u64,
+}
+
 // ---------------------------------------------------------------------
 // Phase 3.D — onboarding wizard support
 // ---------------------------------------------------------------------
@@ -321,6 +336,32 @@ async fn auto_start_node(
                 InboxDm {
                     from,
                     to,
+                    plaintext,
+                    received_at: now,
+                },
+            );
+        }
+    });
+
+    // Stage D L2b — group post drain: surface every decrypted
+    // VersePost the node receives so the frontend's group view
+    // can append it to the right group's chat list.
+    let node_for_vd = node.clone();
+    let app_for_vd = app.clone();
+    tokio::spawn(async move {
+        while let Some(post) = node_for_vd.next_verse_post().await {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let verse_addr = post.envelope.to.unwrap_or([0u8; 32]);
+            let from_addr = post.envelope.from;
+            let plaintext = String::from_utf8_lossy(&post.plaintext).into_owned();
+            let _ = app_for_vd.emit(
+                "verse:post",
+                VersePostEvent {
+                    verse: Address::new(AddressKind::Verse, verse_addr).encode(),
+                    from: Address::new(AddressKind::Side, from_addr).encode(),
                     plaintext,
                     received_at: now,
                 },
@@ -881,6 +922,30 @@ async fn start_node(
                 InboxDm {
                     from,
                     to,
+                    plaintext,
+                    received_at: now,
+                },
+            );
+        }
+    });
+
+    // Stage D L2b — same verse-post drain as auto_start_node.
+    let node_for_vd = node.clone();
+    let app_for_vd = app.clone();
+    tokio::spawn(async move {
+        while let Some(post) = node_for_vd.next_verse_post().await {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let verse_addr = post.envelope.to.unwrap_or([0u8; 32]);
+            let from_addr = post.envelope.from;
+            let plaintext = String::from_utf8_lossy(&post.plaintext).into_owned();
+            let _ = app_for_vd.emit(
+                "verse:post",
+                VersePostEvent {
+                    verse: Address::new(AddressKind::Verse, verse_addr).encode(),
+                    from: Address::new(AddressKind::Side, from_addr).encode(),
                     plaintext,
                     received_at: now,
                 },
