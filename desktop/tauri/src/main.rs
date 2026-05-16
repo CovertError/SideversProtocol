@@ -31,10 +31,14 @@ use serde::Serialize;
 use sidevers_core::keys::{MasterKey, SECRET_KEY_LEN, SideKey};
 use sidevers_core::messages::direct::{DirectBody, DirectKind, DirectMessagePayload};
 use sidevers_core::payload as core_payload;
-use sidevers_core::{Address, AddressKind, ContactCard, Envelope, MessageType, PairingQr, ProfilePayload};
+use sidevers_core::verse::{ContractObject, VerseContentKey};
+use sidevers_core::{
+    Address, AddressKind, ContactCard, Envelope, GroupInvite, MessageType, PairingQr,
+    ProfilePayload,
+};
 use sidevers_net::{
-    InboxEntry, InboxStore, Intent, Node, Session, SideRelationship, SideStore,
-    send_dm as send_dm_helper,
+    InboxEntry, InboxStore, Intent, Node, Session, SideRelationship, SideStore, VerseHost,
+    VerseMembershipRecord, post_to_verse, send_dm as send_dm_helper,
 };
 use std::collections::BTreeSet;
 use tauri::{Emitter, State};
@@ -187,11 +191,7 @@ async fn get_setting(data_dir: String, key: String) -> Result<Option<String>, St
 /// Write a single setting. Creates the side store if it doesn't yet
 /// exist (matches `complete_onboarding` posture).
 #[tauri::command]
-async fn set_setting(
-    data_dir: String,
-    key: String,
-    value: String,
-) -> Result<(), String> {
+async fn set_setting(data_dir: String, key: String, value: String) -> Result<(), String> {
     let dir = PathBuf::from(&data_dir);
     tokio::fs::create_dir_all(&dir)
         .await
@@ -356,9 +356,8 @@ const MAX_BACKUP_FILENAME_LEN: usize = 128;
 /// data. Reject regardless of platform — a backup file written on macOS
 /// then synced to Windows would hit the same trap.
 const WIN_RESERVED: &[&str] = &[
-    "CON", "PRN", "AUX", "NUL",
-    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 ];
 
 /// Validate a user-supplied filename for a seed backup, returning the
@@ -476,7 +475,9 @@ async fn write_seed_backup(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut dir_perms = std::fs::metadata(backup_dir).map_err(|e| e.to_string())?.permissions();
+        let mut dir_perms = std::fs::metadata(backup_dir)
+            .map_err(|e| e.to_string())?
+            .permissions();
         dir_perms.set_mode(0o700);
         std::fs::set_permissions(backup_dir, dir_perms).map_err(|e| e.to_string())?;
     }
@@ -490,7 +491,9 @@ async fn write_seed_backup(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&path).map_err(|e| e.to_string())?.permissions();
+        let mut perms = std::fs::metadata(&path)
+            .map_err(|e| e.to_string())?
+            .permissions();
         perms.set_mode(0o600);
         std::fs::set_permissions(&path, perms).map_err(|e| e.to_string())?;
     }
@@ -593,10 +596,7 @@ async fn set_side_avatar(
 /// or `None`. Frontend wraps the path with Tauri's `convertFileSrc`
 /// to get a webview-loadable URL.
 #[tauri::command]
-async fn get_side_avatar(
-    data_dir: String,
-    side_address: String,
-) -> Result<Option<String>, String> {
+async fn get_side_avatar(data_dir: String, side_address: String) -> Result<Option<String>, String> {
     let dir = PathBuf::from(&data_dir);
     let path = avatar_path_for(&dir, &side_address)?;
     if tokio::fs::try_exists(&path)
@@ -612,10 +612,7 @@ async fn get_side_avatar(
 /// Delete the avatar file for a side. Silent no-op if it doesn't
 /// exist; failure to remove a present file is an error.
 #[tauri::command]
-async fn clear_side_avatar(
-    data_dir: String,
-    side_address: String,
-) -> Result<(), String> {
+async fn clear_side_avatar(data_dir: String, side_address: String) -> Result<(), String> {
     let dir = PathBuf::from(&data_dir);
     let path = avatar_path_for(&dir, &side_address)?;
     match tokio::fs::remove_file(&path).await {
@@ -711,7 +708,16 @@ mod backup_path_tests {
     #[test]
     fn rejects_windows_reserved_device_names_p2b() {
         let (_td, root) = temproot();
-        for name in ["CON", "con", "PRN.bin", "Aux", "nul.txt", "COM1", "lpt9", "CON.SEED.bin"] {
+        for name in [
+            "CON",
+            "con",
+            "PRN.bin",
+            "Aux",
+            "nul.txt",
+            "COM1",
+            "lpt9",
+            "CON.SEED.bin",
+        ] {
             assert!(
                 safe_backup_path(&root, name).is_err(),
                 "must reject Windows reserved name: {name}"
@@ -773,7 +779,10 @@ mod backup_path_tests {
         let p = safe_backup_path(&evil, "seed.bin").unwrap();
         // The resolved path must NOT contain ".." anywhere.
         let s = p.to_string_lossy();
-        assert!(!s.contains("/.."), "canonical path must not contain `..`: {s}");
+        assert!(
+            !s.contains("/.."),
+            "canonical path must not contain `..`: {s}"
+        );
     }
 
     #[test]
@@ -1048,10 +1057,7 @@ async fn list_sides(state: State<'_, AppState>) -> Result<Vec<HostedSide>, Strin
             .map(|a| a.to_string())
             .unwrap_or_else(|| "(unknown)".to_owned());
         let lifecycle = format!("{:?}", s.lifecycle().await);
-        let is_retired = matches!(
-            s.lifecycle().await,
-            sidevers_net::SideLifecycle::Retired
-        );
+        let is_retired = matches!(s.lifecycle().await, sidevers_net::SideLifecycle::Retired);
         out.push(HostedSide {
             side_address: Address::new(AddressKind::Side, s.address).encode(),
             listen_addr: listen,
@@ -1250,7 +1256,9 @@ async fn update_relationship_endpoint(
     // Validate socket-address shape — easier to reject here than at
     // dial time. (Domain names aren't accepted by SocketAddr::parse;
     // the desktop UI is IP:port-only for now.)
-    let _: SocketAddr = addr.parse().map_err(|e: std::net::AddrParseError| e.to_string())?;
+    let _: SocketAddr = addr
+        .parse()
+        .map_err(|e: std::net::AddrParseError| e.to_string())?;
     let updated = side
         .update_relationship(&peer_pk, |r| {
             r.peer_listen_addr = Some(addr.to_owned());
@@ -1525,6 +1533,551 @@ async fn send_dm_live(
 }
 
 // ---------------------------------------------------------------------
+// Phase 3 Stage D L2a — Group sides (verses) on the rail
+// ---------------------------------------------------------------------
+//
+// A "group" in the user-facing UI is a verse (protocol §7.7) plus the
+// local side identity that represents the user inside that verse. Both
+// pieces are minted fresh per group so unlinkability is preserved:
+// your work group's pubkey is unrelated to your personal side.
+//
+// create_group mints both (verse-side hosts the verse, member-side
+// participates as moderator), wires them up locally, persists a
+// VerseMembershipRecord with role="moderator" + the verse seed +
+// contract bytes so restart can re-host. join_group_by_invite mints
+// just a member-side, dials the moderator, sends a JoinRequest, and
+// persists with role="member".
+
+#[derive(Serialize, Clone)]
+struct GroupView {
+    /// Bech32 sv1q address of the verse.
+    verse_address: String,
+    /// Bech32 sv1q address of OUR side in this group (member-side).
+    /// All posting / leaving operates from this side.
+    member_side_address: String,
+    /// "moderator" iff we host this verse locally, "member" otherwise.
+    role: String,
+    /// Group display name from the contract (hint only).
+    name: Option<String>,
+    /// Hex-encoded BLAKE3 of the group photo if the moderator set one.
+    photo_hash_hex: Option<String>,
+    /// Where the verse host listens. Set for member-role rows from the
+    /// invite; moderator-role rows record the local listener.
+    dial_addr: Option<String>,
+    /// Unix-seconds join timestamp.
+    joined_at: u64,
+}
+
+/// List every group across every local side. The frontend calls this
+/// on boot + after every create/join/leave to refresh the rail.
+#[tauri::command]
+async fn list_groups(data_dir: String) -> Result<Vec<GroupView>, String> {
+    let dir = PathBuf::from(&data_dir);
+    if !dir.join("sides.db").exists() {
+        return Ok(Vec::new());
+    }
+    let store = SideStore::open(&dir)
+        .await
+        .map_err(|e| format!("opening side store: {e}"))?;
+    let rows = store
+        .list_all_verse_memberships()
+        .await
+        .map_err(|e| format!("list memberships: {e}"))?;
+    let mut out = Vec::with_capacity(rows.len());
+    for (side, m) in rows {
+        out.push(GroupView {
+            verse_address: Address::new(AddressKind::Verse, m.verse_address).encode(),
+            member_side_address: Address::new(AddressKind::Side, side).encode(),
+            role: m.role,
+            name: m.name,
+            photo_hash_hex: m.photo_hash.map(hex::encode),
+            dial_addr: m.dial_addr,
+            joined_at: m.joined_at,
+        });
+    }
+    Ok(out)
+}
+
+#[derive(Serialize, Clone)]
+struct CreateGroupResp {
+    verse_address: String,
+    member_side_address: String,
+    listen_addr: String,
+    /// `sidevers-group:1:<base32>` URI for sharing with people you
+    /// want to invite. Frontend renders it as both a copyable text
+    /// and a QR code via `generate_group_invite_svg`.
+    group_invite_uri: String,
+}
+
+/// Create a brand-new group. Mints two fresh sides — the verse's
+/// identity + the user's identity inside that verse — wires up a
+/// VerseHost, persists everything to SideStore.
+#[tauri::command]
+async fn create_group(
+    data_dir: String,
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<CreateGroupResp, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("group name cannot be empty".into());
+    }
+    if trimmed.len() > 256 {
+        return Err("group name too long (max 256 chars)".into());
+    }
+    let node = {
+        let g = state.node.lock().await;
+        g.as_ref()
+            .cloned()
+            .ok_or_else(|| "node not started".to_owned())?
+    };
+    let dir = PathBuf::from(&data_dir);
+
+    // Mint the verse identity (the keypair the verse is "signed by").
+    let verse_master = MasterKey::generate().map_err(|e| e.to_string())?;
+    let verse_key = verse_master
+        .derive_side(&format!("verse-{trimmed}").into())
+        .map_err(|e| e.to_string())?;
+    let verse_pubkey = verse_key.public_bytes();
+    let verse_seed = verse_key.to_seed();
+
+    // Mint the moderator's side-as-participant inside this group.
+    let member_master = MasterKey::generate().map_err(|e| e.to_string())?;
+    let member_key = member_master
+        .derive_side(&format!("group-{trimmed}").into())
+        .map_err(|e| e.to_string())?;
+    let member_pubkey = member_key.public_bytes();
+
+    // Host the member-side on the node so they get a QUIC endpoint.
+    // This persists the side via Node::add_side → Side::load_or_create
+    // → SideStore.upsert_side, so restart sees it.
+    let listen = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+    let (_member_side, member_listen) = node
+        .add_side(member_key, listen)
+        .await
+        .map_err(|e| format!("add_side: {e}"))?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    // Minimal contract: title=trimmed, no required/optional fields,
+    // no policies, single moderator. Phase 1.5+ amendments can add
+    // policies / required fields later via VerseAmend.
+    let contract = ContractObject::sign(
+        &verse_key,
+        1,
+        trimmed.to_owned(),
+        String::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        vec![member_pubkey],
+        now,
+    )
+    .map_err(|e| format!("contract sign: {e}"))?;
+    let contract_hash = contract.hash();
+    let contract_wire = contract.to_wire_bytes();
+    let content_key = VerseContentKey::generate().map_err(|e| format!("content key: {e}"))?;
+
+    let host = VerseHost::new(verse_key, contract, content_key);
+    node.host_verse(host.clone()).await;
+
+    // Add the moderator as a local member of their own verse (no QUIC
+    // round-trip). add_local_member returns the same (token, key) pair
+    // a remote member would receive via JoinAccept.
+    let (membership_token, content_key_bytes) = host
+        .add_local_member(member_pubkey, now)
+        .await
+        .map_err(|e| format!("add_local_member: {e}"))?;
+
+    // Persist the membership row so the group survives a restart.
+    let store = SideStore::open(&dir)
+        .await
+        .map_err(|e| format!("opening side store: {e}"))?;
+    let record = VerseMembershipRecord {
+        verse_address: verse_pubkey,
+        contract_hash,
+        membership_token,
+        content_key: content_key_bytes,
+        joined_at: now,
+        role: "moderator".to_owned(),
+        name: Some(trimmed.to_owned()),
+        photo_hash: None,
+        dial_addr: Some(member_listen.to_string()),
+        verse_seed: Some(verse_seed),
+        contract_wire: Some(contract_wire),
+    };
+    store
+        .upsert_verse_membership(&member_pubkey, &record)
+        .await
+        .map_err(|e| format!("persist membership: {e}"))?;
+
+    let invite = GroupInvite {
+        verse: verse_pubkey,
+        contract_hash,
+        dial_addr: member_listen.to_string(),
+        name: Some(trimmed.to_owned()),
+        photo_hash: None,
+    };
+
+    Ok(CreateGroupResp {
+        verse_address: Address::new(AddressKind::Verse, verse_pubkey).encode(),
+        member_side_address: Address::new(AddressKind::Side, member_pubkey).encode(),
+        listen_addr: member_listen.to_string(),
+        group_invite_uri: invite.encode(),
+    })
+}
+
+#[derive(Serialize, Clone)]
+struct JoinGroupResp {
+    verse_address: String,
+    member_side_address: String,
+    listen_addr: String,
+    name: Option<String>,
+}
+
+/// Parse a `sidevers-group:1:` URI, mint a fresh member-side, dial the
+/// moderator, run the JoinRequest/Accept handshake, persist the
+/// resulting VerseMembership.
+#[tauri::command]
+async fn join_group_by_invite(
+    data_dir: String,
+    qr_uri: String,
+    state: State<'_, AppState>,
+) -> Result<JoinGroupResp, String> {
+    let invite =
+        GroupInvite::parse(qr_uri.trim()).map_err(|e| format!("parse group invite: {e}"))?;
+    let node = {
+        let g = state.node.lock().await;
+        g.as_ref()
+            .cloned()
+            .ok_or_else(|| "node not started".to_owned())?
+    };
+    let dir = PathBuf::from(&data_dir);
+
+    // Pseudonymous-per-group: mint a brand-new side for this membership.
+    let label = invite
+        .name
+        .as_deref()
+        .map(|n| format!("group-{n}"))
+        .unwrap_or_else(|| "group-side".to_owned());
+    let member_master = MasterKey::generate().map_err(|e| e.to_string())?;
+    let member_key = member_master
+        .derive_side(&label.clone().into())
+        .map_err(|e| e.to_string())?;
+    let member_pubkey = member_key.public_bytes();
+
+    // Add the side to the node so it has a listening endpoint.
+    // add_side consumes the SideKey but the returned Arc<Side>
+    // re-exposes it via `keypair_arc()`, which the protocol helpers
+    // (fetch_contract, request_join, leave_verse, post_to_verse)
+    // accept as `&SideKey`.
+    let listen = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+    let (member_side, member_listen) = node
+        .add_side(member_key, listen)
+        .await
+        .map_err(|e| format!("add_side: {e}"))?;
+    let member_key_arc = member_side.keypair_arc();
+
+    let dial: SocketAddr = invite
+        .dial_addr
+        .parse()
+        .map_err(|e: std::net::AddrParseError| format!("bad dial_addr: {e}"))?;
+    let session = node
+        .dial_from(&member_pubkey, dial, Intent::Verse)
+        .await
+        .map_err(|e| format!("dial verse: {e}"))?;
+
+    // Fetch the contract so we can verify the invite's hash matches
+    // and consent to a known version. fetch_contract is exported from
+    // sidevers-net::node.
+    let contract = sidevers_net::fetch_contract(&session, &member_key_arc)
+        .await
+        .map_err(|e| format!("fetch contract: {e}"))?;
+    if contract.verse != invite.verse {
+        return Err("fetched contract is for a different verse than invited".into());
+    }
+    if contract.hash() != invite.contract_hash {
+        return Err("contract hash mismatch — invite is stale or tampered".into());
+    }
+
+    // Empty fields for now; contract has no required fields in MVP.
+    let fields = std::collections::BTreeMap::new();
+    let membership = sidevers_net::request_join(&session, &member_key_arc, &contract, fields)
+        .await
+        .map_err(|e| format!("join: {e}"))?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let store = SideStore::open(&dir)
+        .await
+        .map_err(|e| format!("opening side store: {e}"))?;
+    let mut content_key = [0u8; 32];
+    content_key.copy_from_slice(membership.content_key.as_bytes());
+    let record = VerseMembershipRecord {
+        verse_address: invite.verse,
+        contract_hash: membership.contract_hash,
+        membership_token: membership.membership_token,
+        content_key,
+        joined_at: now,
+        role: "member".to_owned(),
+        name: invite.name.clone(),
+        photo_hash: invite.photo_hash,
+        dial_addr: Some(invite.dial_addr.clone()),
+        verse_seed: None,
+        contract_wire: None,
+    };
+    store
+        .upsert_verse_membership(&member_pubkey, &record)
+        .await
+        .map_err(|e| format!("persist membership: {e}"))?;
+
+    Ok(JoinGroupResp {
+        verse_address: Address::new(AddressKind::Verse, invite.verse).encode(),
+        member_side_address: Address::new(AddressKind::Side, member_pubkey).encode(),
+        listen_addr: member_listen.to_string(),
+        name: invite.name,
+    })
+}
+
+/// Send a plaintext post to a group. The frontend passes the
+/// member-side address (the side we joined the verse as); we look
+/// up the membership row to get the content key + verse address +
+/// dial address, dial the verse host (or reuse a cached session in
+/// a later round), and send a VersePost envelope.
+#[tauri::command]
+async fn post_to_group(
+    data_dir: String,
+    member_side_address: String,
+    text: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let node = {
+        let g = state.node.lock().await;
+        g.as_ref()
+            .cloned()
+            .ok_or_else(|| "node not started".to_owned())?
+    };
+    let dir = PathBuf::from(&data_dir);
+    let store = SideStore::open(&dir)
+        .await
+        .map_err(|e| format!("opening side store: {e}"))?;
+    let member_pubkey = decode_side_address(&member_side_address)?;
+    let memberships = store
+        .list_all_verse_memberships()
+        .await
+        .map_err(|e| format!("list memberships: {e}"))?;
+    let (_, record) = memberships
+        .into_iter()
+        .find(|(side, _)| *side == member_pubkey)
+        .ok_or_else(|| "no group membership for that side".to_owned())?;
+
+    let side_arc = node
+        .side_by_address(&member_pubkey)
+        .await
+        .ok_or_else(|| "side not hosted on this node".to_owned())?;
+    let side_key = side_arc.keypair_arc();
+
+    let dial: SocketAddr = record
+        .dial_addr
+        .ok_or_else(|| "no dial address recorded for this group".to_owned())?
+        .parse()
+        .map_err(|e: std::net::AddrParseError| format!("bad dial_addr: {e}"))?;
+
+    // Reconstruct the in-memory VerseMembership the protocol API wants.
+    // Note: we re-derive content_key from stored bytes; this avoids
+    // depending on internal layout of sidevers-net's VerseMembership.
+    let membership = sidevers_net::VerseMembership {
+        verse: record.verse_address,
+        contract_hash: record.contract_hash,
+        membership_token: record.membership_token,
+        content_key: VerseContentKey::from_bytes(record.content_key),
+    };
+
+    let session = node
+        .dial_from(&member_pubkey, dial, Intent::Verse)
+        .await
+        .map_err(|e| format!("dial verse: {e}"))?;
+    post_to_verse(&session, &side_key, &membership, text.as_bytes())
+        .await
+        .map_err(|e| format!("post: {e}"))?;
+    Ok(())
+}
+
+#[derive(Serialize, Clone)]
+struct LeaveGroupResp {
+    verse_address: String,
+}
+
+/// Leave a group. Sends a VerseLeave envelope to the moderator (so
+/// they remove us from the live members set), then deletes the local
+/// VerseMembershipRecord. Disposition is hardcoded to "archive" —
+/// our local posts stay readable; retract semantics are an advanced
+/// option for a later round.
+#[tauri::command]
+async fn leave_group(
+    data_dir: String,
+    member_side_address: String,
+    state: State<'_, AppState>,
+) -> Result<LeaveGroupResp, String> {
+    let node = {
+        let g = state.node.lock().await;
+        g.as_ref()
+            .cloned()
+            .ok_or_else(|| "node not started".to_owned())?
+    };
+    let dir = PathBuf::from(&data_dir);
+    let store = SideStore::open(&dir)
+        .await
+        .map_err(|e| format!("opening side store: {e}"))?;
+    let member_pubkey = decode_side_address(&member_side_address)?;
+    let memberships = store
+        .list_all_verse_memberships()
+        .await
+        .map_err(|e| format!("list memberships: {e}"))?;
+    let (_, record) = memberships
+        .into_iter()
+        .find(|(side, _)| *side == member_pubkey)
+        .ok_or_else(|| "no group membership for that side".to_owned())?;
+    let verse_address = record.verse_address;
+
+    // Best-effort: tell the moderator we're leaving. If they're
+    // unreachable we still delete the local membership.
+    if record.role == "member" {
+        if let (Some(dial_str), side_arc) = (
+            record.dial_addr.clone(),
+            node.side_by_address(&member_pubkey).await,
+        ) {
+            if let Some(side_arc) = side_arc {
+                if let Ok(dial) = dial_str.parse::<SocketAddr>() {
+                    if let Ok(session) = node.dial_from(&member_pubkey, dial, Intent::Verse).await {
+                        let membership = sidevers_net::VerseMembership {
+                            verse: record.verse_address,
+                            contract_hash: record.contract_hash,
+                            membership_token: record.membership_token,
+                            content_key: VerseContentKey::from_bytes(record.content_key),
+                        };
+                        // Disposition = Retain: our prior posts stay
+                        // readable on the moderator's host. Retract is
+                        // the right-to-be-forgotten option; we expose
+                        // it as a Stage E advanced action.
+                        let _ = sidevers_net::leave_verse(
+                            &session,
+                            &side_arc.keypair_arc(),
+                            &membership,
+                            sidevers_core::messages::verse::DataDisposition::Retain,
+                            None,
+                        )
+                        .await;
+                    }
+                }
+            }
+        }
+    }
+
+    store
+        .delete_verse_membership(&member_pubkey, &verse_address)
+        .await
+        .map_err(|e| format!("delete membership: {e}"))?;
+    Ok(LeaveGroupResp {
+        verse_address: Address::new(AddressKind::Verse, verse_address).encode(),
+    })
+}
+
+#[derive(Serialize, Clone)]
+struct GroupMemberView {
+    side_address: String,
+}
+
+/// List the members of a verse we host locally (moderator role).
+/// Plain members don't have authoritative member-list data —
+/// they learn about other members through posts.
+#[tauri::command]
+async fn list_group_members(
+    verse_address: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<GroupMemberView>, String> {
+    let node = {
+        let g = state.node.lock().await;
+        g.as_ref()
+            .cloned()
+            .ok_or_else(|| "node not started".to_owned())?
+    };
+    let verse_pk = {
+        let addr = Address::parse(verse_address.trim()).map_err(|e| format!("parse verse: {e}"))?;
+        if addr.kind() != AddressKind::Verse {
+            return Err("not a verse address".into());
+        }
+        addr.into_key_bytes()
+    };
+    let host = node
+        .hosted_verse(&verse_pk)
+        .await
+        .ok_or_else(|| "this verse isn't hosted on this node (member view)".to_owned())?;
+    let members: Vec<[u8; 32]> = host.members().await;
+    Ok(members
+        .into_iter()
+        .map(|pk| GroupMemberView {
+            side_address: Address::new(AddressKind::Side, pk).encode(),
+        })
+        .collect())
+}
+
+#[derive(Serialize, Clone)]
+struct GroupInviteResp {
+    uri: String,
+    svg: String,
+}
+
+/// Regenerate the invite link for a group we moderate. Joiners scan
+/// or paste the URI; same payload as the one returned from
+/// `create_group`, refreshed in case the dial address has changed.
+#[tauri::command]
+async fn generate_group_invite_svg(
+    data_dir: String,
+    member_side_address: String,
+) -> Result<GroupInviteResp, String> {
+    let dir = PathBuf::from(&data_dir);
+    let store = SideStore::open(&dir)
+        .await
+        .map_err(|e| format!("opening side store: {e}"))?;
+    let member_pubkey = decode_side_address(&member_side_address)?;
+    let memberships = store
+        .list_all_verse_memberships()
+        .await
+        .map_err(|e| format!("list memberships: {e}"))?;
+    let (_, record) = memberships
+        .into_iter()
+        .find(|(side, _)| *side == member_pubkey)
+        .ok_or_else(|| "no group membership for that side".to_owned())?;
+    if record.role != "moderator" {
+        return Err("only the group's moderator can generate invites".into());
+    }
+    let invite = GroupInvite {
+        verse: record.verse_address,
+        contract_hash: record.contract_hash,
+        dial_addr: record.dial_addr.unwrap_or_default(),
+        name: record.name,
+        photo_hash: record.photo_hash,
+    };
+    let uri = invite.encode();
+    let svg = qrcode::QrCode::new(uri.as_bytes())
+        .map_err(|e| format!("qrcode: {e}"))?
+        .render::<qrcode::render::svg::Color>()
+        .min_dimensions(240, 240)
+        .quiet_zone(true)
+        .build();
+    Ok(GroupInviteResp { uri, svg })
+}
+
+// ---------------------------------------------------------------------
 // Legacy key-only commands (kept for offline tooling: seal/open without
 // a live node, address encoding, etc.). These do NOT touch the network.
 // ---------------------------------------------------------------------
@@ -1665,6 +2218,14 @@ fn main() {
             set_side_avatar,
             get_side_avatar,
             clear_side_avatar,
+            // Phase 3 Stage D L2a — group sides on the rail (verses)
+            list_groups,
+            create_group,
+            join_group_by_invite,
+            post_to_group,
+            leave_group,
+            list_group_members,
+            generate_group_invite_svg,
             // Legacy key-only commands (offline tooling)
             generate_master,
             derive_side,

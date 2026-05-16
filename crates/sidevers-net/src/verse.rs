@@ -64,6 +64,45 @@ impl VerseHost {
         self.posts.clone()
     }
 
+    /// Snapshot the verse's current member pubkeys. Used by the
+    /// desktop client's "Group members" UI when this node is the
+    /// verse's moderator (only moderators have an authoritative
+    /// member list — plain members learn each other through posts).
+    pub async fn members(&self) -> Vec<[u8; PUBLIC_KEY_LEN]> {
+        let g = self.inner.lock().await;
+        g.members.iter().copied().collect()
+    }
+
+    /// Phase 3 Stage D — add a member to a locally-hosted verse without
+    /// running the JoinRequest/Accept QUIC round-trip. Used when the
+    /// moderator (who hosts the verse) "joins" their own verse on
+    /// create_group; avoids dialing yourself over loopback for a flow
+    /// that has no remote semantics. Returns the issued MembershipToken
+    /// wire bytes + the verse's content-key bytes — the same two
+    /// pieces a remote member receives via JoinAccept. The caller is
+    /// expected to persist these (via SideStore::upsert_verse_membership)
+    /// so the moderator's session can post + restart-rehydrate.
+    pub async fn add_local_member(
+        &self,
+        member_side: [u8; PUBLIC_KEY_LEN],
+        issued_at: u64,
+    ) -> sidevers_core::Result<(Vec<u8>, [u8; 32])> {
+        let mut g = self.inner.lock().await;
+        g.members.insert(member_side);
+        let version = g.contract.version;
+        g.consented_versions.insert(member_side, version);
+        let contract_hash = g.contract.hash();
+        let token = sidevers_core::verse::MembershipToken::sign(
+            &g.verse_key,
+            contract_hash,
+            member_side,
+            issued_at,
+        )?;
+        let token_bytes = token.to_wire_bytes();
+        let content_key_bytes = *g.content_key.as_bytes();
+        Ok((token_bytes, content_key_bytes))
+    }
+
     pub(crate) async fn with<R>(&self, f: impl FnOnce(&VerseHostInner) -> R) -> R {
         let guard = self.inner.lock().await;
         f(&guard)

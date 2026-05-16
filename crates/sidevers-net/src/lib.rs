@@ -67,12 +67,13 @@ pub use provenance::PublisherTable;
 pub use relationships::{DORMANT_AFTER_SECS, RelationshipTable, SideLifecycle, SideRelationship};
 pub use replay_journal::SqliteReplayJournal;
 pub use reputation::{
-    DEFAULT_BUCKET_CAPACITY, DEFAULT_REFILL_PER_SEC, MAX_MALFORMED, MAX_SIG_FAILURES,
-    PeerReputation, ReputationPolicy, ReputationTable,
+    DEFAULT_BUCKET_CAPACITY, DEFAULT_REFILL_PER_SEC, IpSybilPolicy, IpSybilState, IpSybilTracker,
+    MAX_MALFORMED, MAX_SIG_FAILURES, PeerReputation, ReputationPolicy, ReputationTable,
+    SYBIL_MAX_NEW_PUBKEYS_PER_IP, SYBIL_WINDOW_SECS, SybilDecision,
 };
 pub use session::{Intent, Session};
 pub use side::{CoHolderRecord, PendingPairing, Side};
-pub use side_store::{SCHEMA_VERSION, SideStore, StoredSide};
+pub use side_store::{SCHEMA_VERSION, SideStore, StoredSide, VerseMembershipRecord};
 pub use transport::ALPN;
 pub use verse::VerseHost;
 pub use verse_post_store::{StoredVersePost, VersePostStore};

@@ -29,8 +29,9 @@ pub use features::{FeatureRegistry, FeatureState, phase1_baseline};
 pub use keys::{MasterKey, SideKey, SideLabel};
 pub use log_id::LogId;
 pub use messages::device::{
-    ContactCard, DeltaOp, DeviceRevokePayload, PAIRING_NONCE_LEN, PairingQr, PairingRequestPayload,
-    RelationshipRecord, STATE_BUNDLE_AAD, StateBundleInner, StateBundlePayload, StateDeltaPayload,
+    ContactCard, DeltaOp, DeviceRevokePayload, GroupInvite, PAIRING_NONCE_LEN, PairingQr,
+    PairingRequestPayload, RelationshipRecord, STATE_BUNDLE_AAD, StateBundleInner,
+    StateBundlePayload, StateDeltaPayload,
 };
 pub use messages::profile::{ProfilePayload, capability};
 pub use messages::public::{

@@ -36,7 +36,11 @@ use crate::relationships::SideRelationship;
 /// v4 — Phase 3 Stage C: adds `peer_listen_addr` column to relationships.
 ///      Caches the last-known network endpoint for each saved friend so
 ///      "click a friend → start chat" can dial without re-prompting.
-pub const SCHEMA_VERSION: i64 = 4;
+/// v5 — Phase 3 Stage D: adds `verse_memberships` table. Persists the
+///      membership token + content key + dial-addr per (side, verse)
+///      so joined groups survive an app restart. Group UX builds on
+///      this; without it, joined verses would vanish on relaunch.
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// Newline character used to separate capability tokens in the
 /// relationships.capabilities TEXT column. Capability tokens are
@@ -108,6 +112,7 @@ impl SideStore {
                 conn.execute_batch(SCHEMA_V2_DELTA).map_err(map_sqlite)?;
                 conn.execute_batch(SCHEMA_V3_DELTA).map_err(map_sqlite)?;
                 conn.execute_batch(SCHEMA_V4_DELTA).map_err(map_sqlite)?;
+                conn.execute_batch(SCHEMA_V5_DELTA).map_err(map_sqlite)?;
                 conn.execute(
                     "INSERT INTO schema_version (version) VALUES (?1)",
                     params![SCHEMA_VERSION],
@@ -118,6 +123,7 @@ impl SideStore {
                 conn.execute_batch(SCHEMA_V2_DELTA).map_err(map_sqlite)?;
                 conn.execute_batch(SCHEMA_V3_DELTA).map_err(map_sqlite)?;
                 conn.execute_batch(SCHEMA_V4_DELTA).map_err(map_sqlite)?;
+                conn.execute_batch(SCHEMA_V5_DELTA).map_err(map_sqlite)?;
                 conn.execute(
                     "UPDATE schema_version SET version = ?1",
                     params![SCHEMA_VERSION],
@@ -127,6 +133,7 @@ impl SideStore {
             Some(v) if v < 3 => {
                 conn.execute_batch(SCHEMA_V3_DELTA).map_err(map_sqlite)?;
                 conn.execute_batch(SCHEMA_V4_DELTA).map_err(map_sqlite)?;
+                conn.execute_batch(SCHEMA_V5_DELTA).map_err(map_sqlite)?;
                 conn.execute(
                     "UPDATE schema_version SET version = ?1",
                     params![SCHEMA_VERSION],
@@ -135,6 +142,15 @@ impl SideStore {
             }
             Some(v) if v < 4 => {
                 conn.execute_batch(SCHEMA_V4_DELTA).map_err(map_sqlite)?;
+                conn.execute_batch(SCHEMA_V5_DELTA).map_err(map_sqlite)?;
+                conn.execute(
+                    "UPDATE schema_version SET version = ?1",
+                    params![SCHEMA_VERSION],
+                )
+                .map_err(map_sqlite)?;
+            }
+            Some(v) if v < 5 => {
+                conn.execute_batch(SCHEMA_V5_DELTA).map_err(map_sqlite)?;
                 conn.execute(
                     "UPDATE schema_version SET version = ?1",
                     params![SCHEMA_VERSION],
@@ -623,6 +639,196 @@ impl SideStore {
         }
         Ok(out)
     }
+
+    // ---------------------------------------------------------------
+    // `verse_memberships` table (Phase 3 Stage D — group sides)
+    // ---------------------------------------------------------------
+    //
+    // Persisted membership lets a joined verse survive an app restart
+    // — the user expects "I joined this group yesterday, it's still
+    // there today." membership_token and content_key are sensitive
+    // (they constitute the cryptographic right to participate); the
+    // sides.db file is chmod 0o600 in a 0o700 directory, which is the
+    // only at-rest protection for now. Phase 2 may add keystore-based
+    // encryption-at-rest for this column.
+
+    pub async fn upsert_verse_membership(
+        &self,
+        side: &[u8; 32],
+        m: &VerseMembershipRecord,
+    ) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "INSERT INTO verse_memberships
+                 (side_address, verse_address, contract_hash, membership_token,
+                  content_key, joined_at, role, name, photo_hash, dial_addr,
+                  verse_seed, contract_wire)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(side_address, verse_address) DO UPDATE SET
+                 contract_hash    = excluded.contract_hash,
+                 membership_token = excluded.membership_token,
+                 content_key      = excluded.content_key,
+                 role             = excluded.role,
+                 name             = excluded.name,
+                 photo_hash       = excluded.photo_hash,
+                 dial_addr        = excluded.dial_addr,
+                 verse_seed       = excluded.verse_seed,
+                 contract_wire    = excluded.contract_wire",
+            params![
+                &side[..],
+                &m.verse_address[..],
+                &m.contract_hash[..],
+                &m.membership_token[..],
+                &m.content_key[..],
+                m.joined_at as i64,
+                &m.role,
+                m.name.as_deref(),
+                m.photo_hash.as_ref().map(|h| &h[..]),
+                m.dial_addr.as_deref(),
+                m.verse_seed.as_ref().map(|s| &s[..]),
+                m.contract_wire.as_deref(),
+            ],
+        )
+        .map_err(map_sqlite)?;
+        Ok(())
+    }
+
+    pub async fn delete_verse_membership(&self, side: &[u8; 32], verse: &[u8; 32]) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "DELETE FROM verse_memberships WHERE side_address = ?1 AND verse_address = ?2",
+            params![&side[..], &verse[..]],
+        )
+        .map_err(map_sqlite)?;
+        Ok(())
+    }
+
+    /// Snapshot all verse memberships across every locally-hosted side.
+    /// Returns `(side_address, membership)` pairs so the caller can
+    /// surface the entire group list without iterating sides.
+    pub async fn list_all_verse_memberships(
+        &self,
+    ) -> Result<Vec<([u8; 32], VerseMembershipRecord)>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT side_address, verse_address, contract_hash, membership_token,
+                        content_key, joined_at, role, name, photo_hash, dial_addr,
+                        verse_seed, contract_wire
+                 FROM verse_memberships ORDER BY joined_at ASC",
+            )
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map([], parse_verse_membership_row)
+            .map_err(map_sqlite)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(map_sqlite)?);
+        }
+        Ok(out)
+    }
+
+    /// Look up a specific membership.
+    pub async fn get_verse_membership(
+        &self,
+        side: &[u8; 32],
+        verse: &[u8; 32],
+    ) -> Result<Option<VerseMembershipRecord>> {
+        let conn = self.conn.lock().await;
+        let row: Option<([u8; 32], VerseMembershipRecord)> = conn
+            .query_row(
+                "SELECT side_address, verse_address, contract_hash, membership_token,
+                        content_key, joined_at, role, name, photo_hash, dial_addr,
+                        verse_seed, contract_wire
+                 FROM verse_memberships WHERE side_address = ?1 AND verse_address = ?2",
+                params![&side[..], &verse[..]],
+                parse_verse_membership_row,
+            )
+            .optional()
+            .map_err(map_sqlite)?;
+        Ok(row.map(|(_, m)| m))
+    }
+}
+
+/// One persisted verse membership. Mirrors the runtime `VerseMembership`
+/// returned by `request_join` plus a few UI-hint columns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerseMembershipRecord {
+    pub verse_address: [u8; 32],
+    pub contract_hash: [u8; 32],
+    pub membership_token: Vec<u8>,
+    pub content_key: [u8; 32],
+    pub joined_at: u64,
+    /// `"moderator"` for verses we host locally, `"member"` otherwise.
+    pub role: String,
+    /// Group name copied from the contract title at join time, for UI
+    /// rail rendering without re-fetching the contract.
+    pub name: Option<String>,
+    /// Group photo BLAKE3 hash if the moderator set one (UI hint only;
+    /// the actual bytes live in the ObjectStore).
+    pub photo_hash: Option<[u8; 32]>,
+    /// Last-known dial endpoint for the verse host. Used to redial
+    /// after restart to receive live posts.
+    pub dial_addr: Option<String>,
+    /// Moderator-only: the verse keypair seed. Required to re-host
+    /// the verse after restart. None for plain members.
+    pub verse_seed: Option<[u8; 32]>,
+    /// Moderator-only: the full canonical contract bytes. Required to
+    /// re-instantiate the VerseHost after restart. None for plain
+    /// members (they can refetch from the moderator if they need it).
+    pub contract_wire: Option<Vec<u8>>,
+}
+
+fn parse_verse_membership_row(
+    r: &rusqlite::Row<'_>,
+) -> rusqlite::Result<([u8; 32], VerseMembershipRecord)> {
+    let side_bytes: Vec<u8> = r.get(0)?;
+    let verse_bytes: Vec<u8> = r.get(1)?;
+    let contract_bytes: Vec<u8> = r.get(2)?;
+    let token: Vec<u8> = r.get(3)?;
+    let key_bytes: Vec<u8> = r.get(4)?;
+    let joined_at: i64 = r.get(5)?;
+    let role: String = r.get(6)?;
+    let name: Option<String> = r.get(7)?;
+    let photo_bytes: Option<Vec<u8>> = r.get(8)?;
+    let dial_addr: Option<String> = r.get(9)?;
+    let verse_seed_bytes: Option<Vec<u8>> = r.get(10)?;
+    let contract_wire: Option<Vec<u8>> = r.get(11)?;
+
+    let mut side = [0u8; 32];
+    side.copy_from_slice(&side_bytes);
+    let mut verse = [0u8; 32];
+    verse.copy_from_slice(&verse_bytes);
+    let mut contract_hash = [0u8; 32];
+    contract_hash.copy_from_slice(&contract_bytes);
+    let mut content_key = [0u8; 32];
+    content_key.copy_from_slice(&key_bytes);
+    let photo_hash = photo_bytes.map(|b| {
+        let mut h = [0u8; 32];
+        h.copy_from_slice(&b);
+        h
+    });
+    let verse_seed = verse_seed_bytes.map(|b| {
+        let mut s = [0u8; 32];
+        s.copy_from_slice(&b);
+        s
+    });
+    Ok((
+        side,
+        VerseMembershipRecord {
+            verse_address: verse,
+            contract_hash,
+            membership_token: token,
+            content_key,
+            joined_at: joined_at as u64,
+            role,
+            name,
+            photo_hash,
+            dial_addr,
+            verse_seed,
+            contract_wire,
+        },
+    ))
 }
 
 fn map_sqlite(e: rusqlite::Error) -> Error {
@@ -729,6 +935,34 @@ CREATE TABLE IF NOT EXISTS settings (
 /// existing rows (they get NULL).
 const SCHEMA_V4_DELTA: &str = r#"
 ALTER TABLE relationships ADD COLUMN peer_listen_addr TEXT;
+"#;
+
+/// v4 → v5 migration (Phase 3 Stage D): per-side verse memberships.
+/// One row per (side, verse) pair. The local side may be the verse's
+/// moderator (role = 'moderator') or just a member (role = 'member').
+/// `name` / `photo_hash` are UI hints captured at join time so the
+/// rail can render without re-fetching the contract.
+const SCHEMA_V5_DELTA: &str = r#"
+CREATE TABLE IF NOT EXISTS verse_memberships (
+    side_address     BLOB NOT NULL REFERENCES sides(address) ON DELETE CASCADE,
+    verse_address    BLOB NOT NULL,
+    contract_hash    BLOB NOT NULL,
+    membership_token BLOB NOT NULL,
+    content_key      BLOB NOT NULL,
+    joined_at        INTEGER NOT NULL,
+    role             TEXT NOT NULL,
+    name             TEXT,
+    photo_hash       BLOB,
+    dial_addr        TEXT,
+    -- role='moderator' rows carry the verse keypair seed + the
+    -- canonical contract bytes so we can re-instantiate the VerseHost
+    -- after a restart. role='member' rows leave both NULL — the
+    -- moderator owns the authoritative contract; members hold only
+    -- their consent.
+    verse_seed       BLOB,
+    contract_wire    BLOB,
+    PRIMARY KEY (side_address, verse_address)
+);
 "#;
 
 #[cfg(test)]
@@ -1010,7 +1244,150 @@ mod tests {
             Some("127.0.0.1:50050")
         );
 
-        // Schema version is now v4.
+        // Schema version is now v5 (latest).
+        let conn = store.conn.lock().await;
+        let v: i64 = conn
+            .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+    }
+
+    #[tokio::test]
+    async fn verse_membership_round_trip() {
+        let store = SideStore::open_memory().await.unwrap();
+        store
+            .upsert_side(&StoredSide {
+                address: [0x11; 32],
+                seed: [0x22; 32],
+                label: None,
+                created_at: 1,
+                lifecycle: "Created".to_owned(),
+                last_send_at: None,
+                is_self_retired: false,
+            })
+            .await
+            .unwrap();
+        let m = VerseMembershipRecord {
+            verse_address: [0xAA; 32],
+            contract_hash: [0xBB; 32],
+            membership_token: vec![0xCD, 0xEF, 0x01, 0x23],
+            content_key: [0x42; 32],
+            joined_at: 1_700_000_000,
+            role: "moderator".to_owned(),
+            name: Some("Launch crew".to_owned()),
+            photo_hash: Some([0x99; 32]),
+            dial_addr: Some("127.0.0.1:50050".to_owned()),
+            verse_seed: Some([0x33; 32]),
+            contract_wire: Some(vec![0xAA, 0xBB, 0xCC]),
+        };
+        store
+            .upsert_verse_membership(&[0x11; 32], &m)
+            .await
+            .unwrap();
+        let all = store.list_all_verse_memberships().await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].0, [0x11; 32]);
+        assert_eq!(all[0].1, m);
+        let got = store
+            .get_verse_membership(&[0x11; 32], &[0xAA; 32])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got, m);
+        // Overwrite — the UPDATE branch must round-trip the new values.
+        let mut m2 = m.clone();
+        m2.role = "member".to_owned();
+        m2.dial_addr = Some("203.0.113.10:443".to_owned());
+        store
+            .upsert_verse_membership(&[0x11; 32], &m2)
+            .await
+            .unwrap();
+        let again = store
+            .get_verse_membership(&[0x11; 32], &[0xAA; 32])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(again.role, "member");
+        assert_eq!(again.dial_addr.as_deref(), Some("203.0.113.10:443"));
+        // Delete.
+        store
+            .delete_verse_membership(&[0x11; 32], &[0xAA; 32])
+            .await
+            .unwrap();
+        assert!(
+            store
+                .get_verse_membership(&[0x11; 32], &[0xAA; 32])
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn v4_database_migrates_to_v5_keeps_relationships() {
+        // Build a v4-shaped db by hand, insert a side + relationship +
+        // settings row, then re-open via `SideStore::open` on the same
+        // path. The v5 migration must add the verse_memberships table
+        // without dropping anything else.
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("sides.db");
+
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_version (version INTEGER NOT NULL);
+                 INSERT INTO schema_version (version) VALUES (4);",
+            )
+            .unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.execute_batch(SCHEMA_V2_DELTA).unwrap();
+            conn.execute_batch(SCHEMA_V3_DELTA).unwrap();
+            conn.execute_batch(SCHEMA_V4_DELTA).unwrap();
+            conn.execute(
+                "INSERT INTO sides (address, seed, label, created_at, lifecycle, last_send_at, is_self_retired)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    &[0xAB_u8; 32][..],
+                    &[0xCD_u8; 32][..],
+                    Some("personal"),
+                    1_700_000_000_i64,
+                    "Active",
+                    Option::<i64>::None,
+                    0_i64,
+                ],
+            )
+            .unwrap();
+        }
+
+        let store = SideStore::open(tmp.path()).await.unwrap();
+
+        // Pre-existing side row still loads.
+        let sides = store.list_sides().await.unwrap();
+        assert_eq!(sides.len(), 1);
+        assert_eq!(sides[0].address, [0xAB; 32]);
+
+        // v5 verse_memberships table is usable.
+        let m = VerseMembershipRecord {
+            verse_address: [0x77; 32],
+            contract_hash: [0x88; 32],
+            membership_token: vec![1, 2, 3],
+            content_key: [0x09; 32],
+            joined_at: 1_700_000_500,
+            role: "member".to_owned(),
+            name: Some("after-migration".to_owned()),
+            photo_hash: None,
+            dial_addr: None,
+            verse_seed: None,
+            contract_wire: None,
+        };
+        store
+            .upsert_verse_membership(&[0xAB; 32], &m)
+            .await
+            .unwrap();
+        let all = store.list_all_verse_memberships().await.unwrap();
+        assert_eq!(all.len(), 1);
+
+        // Schema version is now v5.
         let conn = store.conn.lock().await;
         let v: i64 = conn
             .query_row("SELECT version FROM schema_version", [], |r| r.get(0))

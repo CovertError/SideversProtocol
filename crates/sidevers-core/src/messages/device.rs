@@ -804,6 +804,153 @@ fn read_lp_string(
 }
 
 // =========================================================================
+// GroupInvite — "join my group" QR (Phase 3 Stage D)
+// =========================================================================
+//
+// Distinct from both PairingQr and ContactCard:
+//   * PairingQr installs a side keypair on a new device (co-holder).
+//   * ContactCard saves another person as a 1:1 friend on the active side.
+//   * GroupInvite joins a verse (group room). The scanning user mints a
+//     fresh side specifically for participation in that group, dials the
+//     verse host, and sends a JoinRequest under the carried contract.
+//
+// Carries only public information: the verse's address, the contract
+// version's digest, the network endpoint the host listens on, plus
+// optional UI hints (display name, photo hash). Membership token +
+// content key arrive later via JoinAccept; they are not in the invite.
+//
+// Wire layout (after base32 decode):
+//   1B  version (0x01)
+//   32B verse_address (Ed25519 pubkey of the verse)
+//   32B contract_hash (BLAKE3 of canonical contract bytes)
+//   2B  dial_addr length (u16 BE) — 1..=256 bytes
+//   N   dial_addr bytes (UTF-8 socket address)
+//   2B  name length (u16 BE) — 0..=256 bytes
+//   N   name bytes (UTF-8)
+//   1B  photo_hash_present (0 / 1)
+//   [32B] photo_hash if present
+
+/// QR-encoded group invite. URI scheme `sidevers-group:1:<base32>`.
+/// Reading it gives the joiner the verse's identity, the version of
+/// the contract they should consent to, the network endpoint to dial,
+/// and optional UI hints. Carries no secrets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupInvite {
+    /// Verse address (Ed25519 pubkey of the verse identity).
+    pub verse: [u8; 32],
+    /// BLAKE3 of the canonical contract bytes the moderator expects
+    /// the joiner to consent to. The joiner fetches the contract +
+    /// verifies the hash matches.
+    pub contract_hash: [u8; 32],
+    /// Where to dial the verse host. UTF-8 socket address.
+    pub dial_addr: String,
+    /// Optional group name shown in the joiner's UI confirmation.
+    /// Authoritative name comes from the fetched contract.
+    pub name: Option<String>,
+    /// Optional BLAKE3 of the group photo in the moderator's
+    /// ObjectStore. Hint only; the joiner fetches via the object
+    /// store path if they want to render a thumbnail.
+    pub photo_hash: Option<[u8; 32]>,
+}
+
+const GROUP_QR_VERSION: u8 = 0x01;
+const GROUP_QR_SCHEME_PREFIX: &str = "sidevers-group:1:";
+const GROUP_NAME_MAX: usize = 256;
+const GROUP_DIAL_ADDR_MAX: usize = 256;
+
+impl GroupInvite {
+    /// Encode to URI form.
+    pub fn encode(&self) -> String {
+        let name = self.name.as_deref().unwrap_or("");
+        let da = self.dial_addr.as_str();
+        let mut buf = Vec::with_capacity(
+            1 + 32 + 32 + 2 + da.len() + 2 + name.len() + 1 + self.photo_hash.map_or(0, |_| 32),
+        );
+        buf.push(GROUP_QR_VERSION);
+        buf.extend_from_slice(&self.verse);
+        buf.extend_from_slice(&self.contract_hash);
+        buf.extend_from_slice(&(da.len() as u16).to_be_bytes());
+        buf.extend_from_slice(da.as_bytes());
+        buf.extend_from_slice(&(name.len() as u16).to_be_bytes());
+        buf.extend_from_slice(name.as_bytes());
+        match &self.photo_hash {
+            Some(h) => {
+                buf.push(1);
+                buf.extend_from_slice(h);
+            }
+            None => buf.push(0),
+        }
+        let b32 = base32_encode(&buf);
+        format!("{GROUP_QR_SCHEME_PREFIX}{b32}")
+    }
+
+    /// Parse from URI form. Rejects truncated, oversized, or non-UTF-8
+    /// fields.
+    pub fn parse(s: &str) -> Result<Self> {
+        let rest = s
+            .strip_prefix(GROUP_QR_SCHEME_PREFIX)
+            .ok_or_else(|| Error::CborDecode("group QR: missing scheme prefix".into()))?;
+        let bytes =
+            base32_decode(rest).ok_or_else(|| Error::CborDecode("group QR: bad base32".into()))?;
+        if bytes.is_empty() || bytes[0] != GROUP_QR_VERSION {
+            return Err(Error::CborDecode("group QR: bad version".into()));
+        }
+        // 1 + 32 + 32 + 2 + 2 + 1 (photo flag) = 70 bytes minimum
+        if bytes.len() < 1 + 32 + 32 + 2 + 2 + 1 {
+            return Err(Error::CborDecode("group QR: truncated".into()));
+        }
+        let mut verse = [0u8; 32];
+        verse.copy_from_slice(&bytes[1..33]);
+        let mut contract_hash = [0u8; 32];
+        contract_hash.copy_from_slice(&bytes[33..65]);
+
+        let mut pos = 65usize;
+        let (dial_addr, new_pos) =
+            read_lp_string(&bytes, pos, GROUP_DIAL_ADDR_MAX, "group QR: dial_addr")?;
+        pos = new_pos;
+        if dial_addr.is_empty() {
+            return Err(Error::CborDecode("group QR: empty dial_addr".into()));
+        }
+        let (name, new_pos) = read_lp_string(&bytes, pos, GROUP_NAME_MAX, "group QR: name")?;
+        pos = new_pos;
+
+        // Photo-hash presence flag + optional 32 bytes.
+        if pos >= bytes.len() {
+            return Err(Error::CborDecode("group QR: missing photo flag".into()));
+        }
+        let photo_flag = bytes[pos];
+        pos += 1;
+        let photo_hash = match photo_flag {
+            0 => None,
+            1 => {
+                if pos + 32 > bytes.len() {
+                    return Err(Error::CborDecode("group QR: photo_hash truncated".into()));
+                }
+                let mut h = [0u8; 32];
+                h.copy_from_slice(&bytes[pos..pos + 32]);
+                pos += 32;
+                Some(h)
+            }
+            _ => {
+                return Err(Error::CborDecode("group QR: bad photo flag".into()));
+            }
+        };
+
+        if pos != bytes.len() {
+            return Err(Error::CborDecode("group QR: trailing bytes".into()));
+        }
+
+        Ok(Self {
+            verse,
+            contract_hash,
+            dial_addr,
+            name: if name.is_empty() { None } else { Some(name) },
+            photo_hash,
+        })
+    }
+}
+
+// =========================================================================
 // PairingQr — URI codec for the QR code the existing device shows
 // =========================================================================
 
@@ -1996,6 +2143,84 @@ mod tests {
         buf.extend_from_slice(b"a:b:c");
         let s = format!("{}{}", CONTACT_QR_SCHEME_PREFIX, base32_encode(&buf));
         assert!(ContactCard::parse(&s).is_err());
+    }
+
+    #[test]
+    fn group_invite_round_trip_full() {
+        let g = GroupInvite {
+            verse: [0x11; 32],
+            contract_hash: [0x22; 32],
+            dial_addr: "127.0.0.1:50050".to_owned(),
+            name: Some("Launch crew".to_owned()),
+            photo_hash: Some([0x99; 32]),
+        };
+        let s = g.encode();
+        assert!(s.starts_with(GROUP_QR_SCHEME_PREFIX));
+        let parsed = GroupInvite::parse(&s).unwrap();
+        assert_eq!(parsed, g);
+    }
+
+    #[test]
+    fn group_invite_round_trip_no_optionals() {
+        let g = GroupInvite {
+            verse: [0xAB; 32],
+            contract_hash: [0xCD; 32],
+            dial_addr: "203.0.113.10:4001".to_owned(),
+            name: None,
+            photo_hash: None,
+        };
+        let s = g.encode();
+        let parsed = GroupInvite::parse(&s).unwrap();
+        assert_eq!(parsed, g);
+    }
+
+    #[test]
+    fn group_invite_rejects_bad_prefix() {
+        assert!(GroupInvite::parse("sidevers-contact:1:abc").is_err());
+        assert!(GroupInvite::parse("https://example.com").is_err());
+        assert!(GroupInvite::parse("").is_err());
+    }
+
+    #[test]
+    fn group_invite_rejects_empty_dial_addr() {
+        let g = GroupInvite {
+            verse: [0x01; 32],
+            contract_hash: [0x02; 32],
+            dial_addr: String::new(),
+            name: None,
+            photo_hash: None,
+        };
+        let s = g.encode();
+        // Encoder produces it; decoder must refuse.
+        assert!(GroupInvite::parse(&s).is_err());
+    }
+
+    #[test]
+    fn group_invite_rejects_wrong_version_byte() {
+        let mut buf = Vec::new();
+        buf.push(0x02);
+        buf.extend_from_slice(&[0; 32]);
+        buf.extend_from_slice(&[0; 32]);
+        buf.extend_from_slice(&5u16.to_be_bytes());
+        buf.extend_from_slice(b"a:b:c");
+        buf.extend_from_slice(&0u16.to_be_bytes());
+        buf.push(0);
+        let s = format!("{}{}", GROUP_QR_SCHEME_PREFIX, base32_encode(&buf));
+        assert!(GroupInvite::parse(&s).is_err());
+    }
+
+    #[test]
+    fn group_invite_rejects_bad_photo_flag() {
+        let mut buf = Vec::new();
+        buf.push(GROUP_QR_VERSION);
+        buf.extend_from_slice(&[0; 32]);
+        buf.extend_from_slice(&[0; 32]);
+        buf.extend_from_slice(&5u16.to_be_bytes());
+        buf.extend_from_slice(b"a:b:c");
+        buf.extend_from_slice(&0u16.to_be_bytes());
+        buf.push(2); // bad flag — must be 0 or 1
+        let s = format!("{}{}", GROUP_QR_SCHEME_PREFIX, base32_encode(&buf));
+        assert!(GroupInvite::parse(&s).is_err());
     }
 
     #[test]
