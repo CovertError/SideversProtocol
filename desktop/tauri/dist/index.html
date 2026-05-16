@@ -18,12 +18,17 @@
     <div id="onboarding" class="onboarding" hidden>
       <div class="onboarding-card">
         <img src="logo.png" alt="Sidevers" class="onboarding-logo" />
+        <!-- Stage D Layer 1: the "create your first side" step is gone.
+             Every new install auto-creates a side labeled "personal" at
+             data-dir-next time. Stepper shows 4 dots (welcome → data dir →
+             backup → done). The data-step values stay aligned with the
+             data-screen values they reference; "4" / "5" map to backup
+             and done respectively. -->
         <ol class="onboarding-stepper" id="onboarding-stepper">
           <li class="onboarding-step active" data-step="1">1</li>
           <li class="onboarding-step" data-step="2">2</li>
-          <li class="onboarding-step" data-step="3">3</li>
-          <li class="onboarding-step" data-step="4">4</li>
-          <li class="onboarding-step" data-step="5">5</li>
+          <li class="onboarding-step" data-step="4">3</li>
+          <li class="onboarding-step" data-step="5">4</li>
         </ol>
 
         <section class="onboarding-screen" data-screen="1">
@@ -35,9 +40,9 @@
             keys, your data, your reach.
           </p>
           <p data-i18n="onboard.welcome.next">
-            We'll walk through four steps: pick where Sidevers stores
-            your data, create your first side, back up its key, and
-            then you're done.
+            Three steps: pick where Sidevers stores your data, save a
+            recovery file in case you lose this device, then you're done.
+            We'll create your personal side automatically.
           </p>
           <div class="onboarding-actions">
             <button id="ob-next-1" data-i18n="btn.next">Next</button>
@@ -65,81 +70,71 @@
           </div>
         </section>
 
-        <section class="onboarding-screen" data-screen="3" hidden>
-          <h1 data-i18n="onboard.side.h">Create your first side</h1>
-          <p data-i18n="onboard.side.body">
-            A "side" is an identity — call it whatever fits the
-            context. Common labels are <code>work</code>,
-            <code>private</code>, <code>public</code>, <code>close</code>.
-            You can add more sides later from the main UI.
-          </p>
-          <div class="row">
-            <input
-              id="ob-side-label"
-              type="text"
-              spellcheck="false"
-              value="work"
-            />
-          </div>
-          <pre id="ob-side-error" class="error" role="alert"></pre>
-          <div class="onboarding-actions">
-            <button id="ob-back-3" class="secondary" data-i18n="btn.back">Back</button>
-            <button id="ob-next-3" data-i18n="btn.create_side">Create side</button>
-          </div>
-        </section>
+        <!-- Stage D L1: data-screen="3" (side label picker) removed.
+             ob-next-2 in onboarding.js now mints a side labeled
+             "personal" via start_node + jumps straight to data-screen="4"
+             (backup). A hidden #ob-side-error sink keeps the existing
+             error-rendering helper happy. -->
+        <pre id="ob-side-error" class="error" role="alert" hidden></pre>
 
         <section class="onboarding-screen" data-screen="4" hidden>
-          <h1 data-i18n="onboard.backup.h">Back up your seed</h1>
-          <p data-i18n="onboard.backup.warn">
-            <strong>This is the only copy of your private key.</strong>
-            If you lose it and never paired another device, your
-            identity is gone — there's no recovery service. The file
-            below is encrypted with a passphrase you choose now; store
-            both the file and the passphrase somewhere safe (USB stick
-            or password manager, not cloud-sync).
+          <h1 data-i18n="onboard.backup.h">Save a recovery file</h1>
+          <p data-i18n="onboard.backup.body">
+            If you lose this device, the only way to bring this identity
+            back is the file we save now plus a passphrase you set now.
+            You can also do this later from Settings → Backup.
           </p>
+
           <div class="sv-field">
-            <label class="sv-field-label" for="ob-backup-filename">
-              Filename
-            </label>
+            <label class="sv-field-label" for="ob-backup-filename"
+                   data-i18n="onboard.backup.filename_label">Filename</label>
             <input
               id="ob-backup-filename"
               type="text"
               spellcheck="false"
-              placeholder="sidevers-seed-2026-05-16.bin"
+              placeholder="work-seed.bin"
             />
+            <span class="ob-hint" id="ob-backup-dest"></span>
           </div>
+
           <div class="sv-field">
-            <label class="sv-field-label" for="ob-backup-passphrase">
-              Passphrase
-            </label>
+            <label class="sv-field-label" for="ob-backup-passphrase"
+                   data-i18n="onboard.backup.passphrase_label">Passphrase</label>
             <input
               id="ob-backup-passphrase"
               type="password"
               spellcheck="false"
               autocomplete="new-password"
-              placeholder="choose a strong passphrase"
+              data-i18n-placeholder="onboard.backup.passphrase_placeholder"
+              placeholder="at least 8 characters"
             />
           </div>
+
           <div class="sv-field">
-            <label class="sv-field-label" for="ob-backup-passphrase-confirm">
-              Confirm passphrase
-            </label>
+            <label class="sv-field-label" for="ob-backup-passphrase-confirm"
+                   data-i18n="onboard.backup.confirm_label">Confirm</label>
             <input
               id="ob-backup-passphrase-confirm"
               type="password"
               spellcheck="false"
               autocomplete="new-password"
-              placeholder="retype the passphrase"
+              data-i18n-placeholder="onboard.backup.confirm_placeholder"
+              placeholder="retype it"
             />
+            <span class="ob-hint" id="ob-backup-match"
+                  aria-live="polite"></span>
           </div>
-          <div class="row">
-            <button id="ob-save-seed" data-i18n="btn.save_seed">
-              Save encrypted seed file
-            </button>
+
+          <div class="row" style="margin-top:0.25rem">
+            <button id="ob-save-seed" disabled
+                    data-i18n="btn.save_recovery">Encrypt and save</button>
+            <button id="ob-skip-backup" class="secondary"
+                    data-i18n="btn.skip_backup">Skip for now</button>
           </div>
+
           <pre id="ob-backup-error" class="error" role="alert"></pre>
-          <pre id="ob-backup-ok" class="hint" aria-live="polite"></pre>
+          <pre id="ob-backup-ok" class="ob-saved" aria-live="polite"></pre>
+
           <div class="onboarding-actions">
             <button id="ob-back-4" class="secondary" data-i18n="btn.back">Back</button>
             <button id="ob-next-4" disabled data-i18n="btn.next">Next</button>
@@ -233,14 +228,47 @@
       <main class="sv-pane-main">
         <!-- Welcome / empty view -->
         <div class="sv-view" data-view="welcome">
-          <div class="sv-empty">
-            <h2 data-i18n="welcome.h">Pick a chat or add a friend</h2>
-            <p data-i18n="welcome.body">
+          <div class="sv-welcome">
+            <h2 class="sv-welcome-title" data-i18n="welcome.h">Pick a chat or add a friend</h2>
+            <p class="sv-welcome-sub" data-i18n="welcome.body">
               Friends and chats appear on the left for the side you're
-              in. Switch sides on the far-left rail. Click a friend
-              to open a chat.
+              in. Switch sides on the far-left rail. Or:
             </p>
-            <button id="welcome-add-friend" data-i18n="btn.add_friend">+ Add a friend</button>
+            <div class="sv-welcome-quick">
+              <button class="sv-quick-row" id="welcome-add-friend">
+                <span class="sv-quick-icon">
+                  <svg viewBox="0 0 24 24" stroke-width="1.6" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M18 7.5v3m0 0v3m0-3h3m-3 0h-3m-2.25-4.125a3.375 3.375 0 1 1-6.75 0 3.375 3.375 0 0 1 6.75 0ZM3 19.235v-.11a6.375 6.375 0 0 1 12.75 0v.109A12.318 12.318 0 0 1 9.374 21c-2.331 0-4.512-.645-6.374-1.766Z" />
+                  </svg>
+                </span>
+                <span class="sv-quick-text">
+                  <span class="sv-quick-title" data-i18n="welcome.quick_add">Add a friend</span>
+                  <span class="sv-quick-sub" data-i18n="welcome.quick_add_sub">Paste a code or scan a QR</span>
+                </span>
+              </button>
+              <button class="sv-quick-row" id="welcome-share">
+                <span class="sv-quick-icon">
+                  <svg viewBox="0 0 24 24" stroke-width="1.6" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M7.217 10.907a2.25 2.25 0 1 0 0 2.186m0-2.186c.18.324.283.696.283 1.093s-.103.77-.283 1.093m0-2.186 9.566-5.314m-9.566 7.5 9.566 5.314m0 0a2.25 2.25 0 1 0 3.935 2.186 2.25 2.25 0 0 0-3.935-2.186Zm0-12.814a2.25 2.25 0 1 0 3.933-2.185 2.25 2.25 0 0 0-3.933 2.185Z" />
+                  </svg>
+                </span>
+                <span class="sv-quick-text">
+                  <span class="sv-quick-title" data-i18n="welcome.quick_share">Share my invite link</span>
+                  <span class="sv-quick-sub" data-i18n="welcome.quick_share_sub">Send to people you want to chat with</span>
+                </span>
+              </button>
+              <button class="sv-quick-row" id="welcome-switch">
+                <span class="sv-quick-icon">
+                  <svg viewBox="0 0 24 24" stroke-width="1.6" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M7.5 21 3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5" />
+                  </svg>
+                </span>
+                <span class="sv-quick-text">
+                  <span class="sv-quick-title" data-i18n="welcome.quick_switch">Switch side</span>
+                  <span class="sv-quick-sub" data-i18n="welcome.quick_switch_sub">Or create a new one</span>
+                </span>
+              </button>
+            </div>
           </div>
         </div>
 
@@ -259,10 +287,12 @@
           </header>
           <div class="sv-thread" id="thread-list"></div>
           <div class="sv-compose">
-            <textarea id="compose-text" rows="1"
-                      data-i18n-placeholder="thread.compose_placeholder"
-                      placeholder="Message…"></textarea>
-            <button id="compose-send" data-i18n="btn.send">Send</button>
+            <div class="sv-compose-shell">
+              <textarea id="compose-text" rows="1"
+                        data-i18n-placeholder="thread.compose_placeholder"
+                        placeholder="Message…"></textarea>
+              <button id="compose-send" data-i18n="btn.send">Send</button>
+            </div>
           </div>
         </div>
 
@@ -353,9 +383,13 @@
                   <textarea id="contact-qr-uri" class="sv-mono" readonly rows="2"></textarea>
                 </div>
               </div>
-              <button id="contact-qr-generate" data-i18n="btn.generate_code">
-                Show my friend code
-              </button>
+              <div class="sv-invite-actions">
+                <button id="contact-qr-generate" data-i18n="btn.generate_code">
+                  Show my invite link
+                </button>
+                <button id="contact-qr-copy" class="secondary" hidden
+                        data-i18n="btn.copy_invite">Copy link</button>
+              </div>
             </div>
 
             <!-- "Add by code" tab -->
@@ -389,6 +423,30 @@
           </header>
           <div class="sv-form">
             <div class="sv-form-section">
+              <div class="sv-form-title" data-i18n="side_settings.photo_h">
+                Photo
+              </div>
+              <p class="sv-form-sub" data-i18n="side_settings.photo_sub">
+                Pick an image to represent this side. Stored locally on this
+                device for now; friends still see your initials until profile
+                photos travel on the wire.
+              </p>
+              <div class="sv-photo-block">
+                <div class="sv-photo-preview">
+                  <span id="side-photo-preview" class="sv-avatar sv-avatar-lg">—</span>
+                </div>
+                <div class="sv-photo-actions">
+                  <input id="side-photo-file" type="file"
+                         accept="image/png,image/jpeg" hidden />
+                  <button id="side-photo-change"
+                          data-i18n="btn.change_photo">Change photo</button>
+                  <button id="side-photo-clear" class="secondary"
+                          data-i18n="btn.clear_photo">Remove</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="sv-form-section">
               <div class="sv-form-title" data-i18n="side_settings.profile_h">
                 Profile (published)
               </div>
@@ -398,8 +456,13 @@
                 hit Save.
               </p>
               <div class="sv-field">
-                <label class="sv-field-label" data-i18n="profile.name_label">Display name</label>
-                <input id="profile-name" type="text" spellcheck="false" />
+                <label class="sv-field-label" data-i18n="profile.name_label">Username</label>
+                <input id="profile-name" type="text" spellcheck="false"
+                       data-i18n-placeholder="profile.username_placeholder"
+                       placeholder="@your-handle" />
+                <span class="ob-hint" data-i18n="profile.username_hint">
+                  Letters, numbers, dots, dashes, underscores · up to 32 chars · not unique yet
+                </span>
               </div>
               <div class="sv-field">
                 <label class="sv-field-label" data-i18n="profile.bio_label">Bio</label>
@@ -651,6 +714,11 @@
 
     <!-- Phase 3.H i18n shim. Loads as a module so it can fetch JSON. -->
     <script type="module" src="i18n.js"></script>
+    <!-- In-DOM confirm/prompt helpers — replaces window.confirm/prompt
+         which Tauri 2 webviews don't reliably support. Loaded first so
+         both onboarding.js and main.js can use window.svConfirm /
+         window.svPrompt without ordering issues. -->
+    <script src="dialog.js"></script>
     <!-- Phase 3.D onboarding wizard. Decides between wizard / chat shell;
          calls window.svBoot once a node is up. -->
     <script src="onboarding.js"></script>

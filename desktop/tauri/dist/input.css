@@ -42,14 +42,30 @@
 
 /* Dark mode flips the semantic aliases. Tailwind v4 default
  * darkMode = `class` — `<html class="dark">` activates. Settings
- * page's theme toggle persists this via SideStore. */
+ * page's theme toggle persists this via SideStore.
+ *
+ * Three-tone shell: rail / inside / main use different shades so
+ * the columns read as distinct regions (Discord posture, brand
+ * monochrome). Light mode darkens left-to-right; dark mode reverses. */
+@theme {
+  --color-sv-rail-bg: var(--color-sv-mist);
+  --color-sv-inside-bg: var(--color-sv-snow);
+  --color-sv-main-bg: var(--color-sv-snow);
+  --color-sv-hover-bg: #e8e8ed;
+  --color-sv-active-bg: #dcdce0;
+}
 .dark {
   --color-sv-bg: var(--color-sv-onyx);
   --color-sv-surface: var(--color-sv-ink);
-  --color-sv-border: #3a3a3c;
+  --color-sv-border: #2d2d2f;
   --color-sv-text: var(--color-sv-mist);
   --color-sv-text-muted: var(--color-sv-silver);
   --color-sv-text-strong: var(--color-sv-snow);
+  --color-sv-rail-bg: #0b0b0d;
+  --color-sv-inside-bg: #161618;
+  --color-sv-main-bg: #1d1d1f;
+  --color-sv-hover-bg: #232325;
+  --color-sv-active-bg: #2a2a2c;
 }
 
 /* Phase 3.J local @font-face — files in dist/fonts/. If absent, the
@@ -368,6 +384,41 @@
     gap: 0.5rem;
     margin-top: 0.5rem;
   }
+
+  /* Step 4 helpers: small captions under inputs (destination preview,
+   * passphrase-match indicator) and a "saved-to" confirmation block. */
+  .ob-hint {
+    display: block;
+    margin-top: 0.25rem;
+    font-size: 0.72rem;
+    color: var(--color-sv-text-muted);
+    font-family: var(--font-mono);
+    word-break: break-all;
+    min-height: 1em;
+  }
+  .ob-hint.ok {
+    color: var(--color-sv-text-strong);
+  }
+  .ob-hint.bad {
+    color: #d70015;
+  }
+  .ob-saved {
+    margin: 0;
+    padding: 0.5rem 0.7rem;
+    background: var(--color-sv-bg);
+    border: 1px solid var(--color-sv-border);
+    border-radius: 6px;
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    color: var(--color-sv-text);
+    white-space: pre-wrap;
+    word-break: break-all;
+    min-height: 0;
+    line-height: 1.45;
+  }
+  .ob-saved:empty {
+    display: none;
+  }
 }
 
 /* ---------------------------------------------------------------------
@@ -396,8 +447,7 @@
   /* ---- 1) Side rail ---------------------------------------------- */
   .sv-rail {
     grid-column: 1;
-    border-inline-end: 1px solid var(--color-sv-border);
-    background: var(--color-sv-surface);
+    background: var(--color-sv-rail-bg);
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -443,13 +493,15 @@
     font-family: inherit;
     transition:
       background 0.12s ease,
-      color 0.12s ease;
+      color 0.12s ease,
+      border-radius 0.18s ease;
     position: relative;
   }
   .sv-rail-btn:hover:not(:disabled) {
-    background: var(--color-sv-bg);
+    background: var(--color-sv-hover-bg);
     color: var(--color-sv-text);
     opacity: 1;
+    border-radius: 30%;
   }
   .sv-rail-btn:focus-visible {
     outline: 2px solid var(--color-sv-text);
@@ -461,8 +513,31 @@
     stroke: currentColor;
     fill: none;
   }
+  /* Discord-style left-edge "selected indicator" pill on the active
+   * side avatar. Sits in the gutter between the side rail and the
+   * inside column. Logical inset-inline-start so RTL mirrors it. */
+  .sv-rail-btn[data-active="true"]::before {
+    content: "";
+    position: absolute;
+    inset-inline-start: -0.75rem;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 4px;
+    height: 1.4rem;
+    border-radius: 0 4px 4px 0;
+    background: var(--color-sv-text-strong);
+  }
+  [dir="rtl"] .sv-rail-btn[data-active="true"]::before {
+    border-radius: 4px 0 0 4px;
+  }
+  .sv-rail-btn[data-active="true"] {
+    border-radius: 30%;
+  }
+  .sv-rail-btn[data-active="true"] .sv-rail-avatar {
+    border-radius: 30%;
+  }
 
-  /* Avatars — circles with deterministic-color + initials. */
+  /* Avatars — squircle (Discord-shape), deterministic-color, initials. */
   .sv-avatar {
     width: 2.4rem;
     height: 2.4rem;
@@ -476,55 +551,72 @@
     letter-spacing: 0.02em;
     user-select: none;
     flex: 0 0 auto;
-    border: 2px solid transparent;
     transition:
-      border-color 0.12s ease,
+      border-radius 0.18s ease,
       transform 0.12s ease;
   }
   .sv-avatar-sm {
-    width: 1.8rem;
-    height: 1.8rem;
-    font-size: 0.7rem;
+    width: 2rem;
+    height: 2rem;
+    font-size: 0.72rem;
+  }
+  .sv-avatar-md {
+    width: 2.6rem;
+    height: 2.6rem;
+    font-size: 0.9rem;
   }
   .sv-avatar-lg {
-    width: 3rem;
-    height: 3rem;
-    font-size: 1rem;
+    width: 3.4rem;
+    height: 3.4rem;
+    font-size: 1.05rem;
   }
 
-  /* Side-rail avatar variant: active sides get a brand-color ring. */
+  /* Side-rail avatar variant. */
   .sv-rail-avatar {
     width: 2.4rem;
     height: 2.4rem;
   }
-  .sv-rail-btn[data-active="true"] .sv-rail-avatar {
-    border-color: var(--color-sv-text);
-  }
-  .sv-rail-btn[data-active="true"] {
-    background: var(--color-sv-bg);
-  }
 
-  /* Unread badge dot top-right of the avatar. */
+  /* Unread badge — top-right of an avatar. */
   .sv-rail-unread {
     position: absolute;
-    top: 4px;
-    inset-inline-end: 4px;
-    width: 9px;
-    height: 9px;
+    top: 2px;
+    inset-inline-end: 2px;
+    width: 10px;
+    height: 10px;
     border-radius: 50%;
     background: var(--color-sv-text-strong);
-    border: 2px solid var(--color-sv-surface);
+    border: 2px solid var(--color-sv-rail-bg);
+  }
+
+  /* Presence dot — sits on the bottom-right corner of an avatar. */
+  .sv-avatar-presence {
+    position: absolute;
+    bottom: -1px;
+    inset-inline-end: -1px;
+    width: 0.7rem;
+    height: 0.7rem;
+    border-radius: 50%;
+    background: var(--color-sv-silver-light);
+    border: 2px solid var(--color-sv-inside-bg);
+  }
+  .sv-avatar-presence.online {
+    background: #34c759;
+  }
+  .sv-avatar-wrap {
+    position: relative;
+    display: inline-flex;
+    flex: 0 0 auto;
   }
 
   /* ---- 2) In-side column ---------------------------------------- */
   .sv-inside {
     grid-column: 2;
-    border-inline-end: 1px solid var(--color-sv-border);
     display: flex;
     flex-direction: column;
     overflow-y: auto;
     overflow-x: hidden;
-    background: var(--color-sv-bg);
+    background: var(--color-sv-inside-bg);
   }
   .sv-inside-empty {
     padding: 2rem 1.25rem;
@@ -537,10 +629,10 @@
     flex-direction: column;
     gap: 0.25rem;
     padding: 0.95rem 1rem 0.85rem;
-    border-bottom: 1px solid var(--color-sv-border);
+    box-shadow: 0 1px 0 var(--color-sv-border);
     position: sticky;
     top: 0;
-    background: var(--color-sv-bg);
+    background: var(--color-sv-inside-bg);
     z-index: 1;
   }
   .sv-inside-title {
@@ -749,54 +841,106 @@
     align-items: center;
   }
 
-  .sv-bubble {
-    max-width: 32rem;
-    padding: 0.55rem 0.85rem;
-    border-radius: 14px;
-    font-size: 0.9rem;
-    line-height: 1.45;
-    word-wrap: break-word;
-    white-space: pre-wrap;
+  /* Author-row messages (Slack/Discord posture; replaces bubbles). */
+  .sv-msg {
+    display: flex;
+    gap: 0.75rem;
+    padding: 0.35rem 1.25rem;
+    align-items: flex-start;
+    transition: background 0.1s ease;
   }
-  .sv-bubble-sent {
-    align-self: flex-end;
-    background: var(--color-sv-text-strong);
-    color: var(--color-sv-bg);
-    border-bottom-right-radius: 4px;
-    margin-inline-start: auto;
+  .sv-msg:hover {
+    background: var(--color-sv-hover-bg);
   }
-  .sv-bubble-received {
-    align-self: flex-start;
-    background: var(--color-sv-surface);
-    color: var(--color-sv-text);
-    border-bottom-left-radius: 4px;
-    margin-inline-end: auto;
+  .sv-msg-avatar-slot {
+    flex: 0 0 2.4rem;
+    width: 2.4rem;
+    min-height: 1px;
+    display: flex;
+    justify-content: center;
+    padding-top: 0.15rem;
   }
-  .sv-bubble-meta {
-    font-size: 0.65rem;
+  .sv-msg-content {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+  }
+  .sv-msg-header {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    line-height: 1.2;
+  }
+  .sv-msg-name {
+    color: var(--color-sv-text-strong);
+    font-weight: 600;
+    font-size: 0.88rem;
+  }
+  .sv-msg-time {
     color: var(--color-sv-text-muted);
-    margin: 0 0.25rem;
-    align-self: flex-end;
+    font-size: 0.7rem;
   }
-  .sv-bubble-meta.received {
-    align-self: flex-start;
+  .sv-msg-body {
+    color: var(--color-sv-text);
+    font-size: 0.9rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    overflow-wrap: anywhere;
+  }
+  /* Grouped: subsequent message from the same author within ~5 min.
+   * No avatar / header — body indents to align under the previous
+   * message body. Hover-bg still applies. */
+  .sv-msg-grouped {
+    padding-top: 0.05rem;
+    padding-bottom: 0.05rem;
+  }
+  .sv-msg-grouped .sv-msg-avatar-slot {
+    visibility: hidden;
+  }
+  .sv-msg-grouped .sv-msg-header {
+    display: none;
   }
 
-  /* Compose row, anchored at thread bottom. */
+  /* Compose row — wraps the textarea + send in a deliberate shell so
+   * it doesn't feel like a raw textarea pinned to the bottom edge. */
   .sv-compose {
     flex: 0 0 auto;
-    display: flex;
-    gap: 0.5rem;
-    align-items: flex-end;
-    padding: 0.75rem 1.25rem;
+    display: block;
+    padding: 0.65rem 1.25rem 1rem;
+    background: var(--color-sv-main-bg);
     border-top: 1px solid var(--color-sv-border);
-    background: var(--color-sv-bg);
   }
-  .sv-compose textarea {
+  .sv-compose-shell {
+    display: flex;
+    align-items: flex-end;
+    gap: 0.5rem;
+    padding: 0.45rem 0.6rem 0.45rem 0.85rem;
+    background: var(--color-sv-bg);
+    border: 1px solid var(--color-sv-border);
+    border-radius: 10px;
+    transition: border-color 0.12s ease;
+  }
+  .sv-compose-shell:focus-within {
+    border-color: var(--color-sv-text);
+  }
+  .sv-compose-shell textarea {
     flex: 1 1 auto;
-    min-height: 2.5rem;
-    max-height: 8rem;
+    min-height: 1.4rem;
+    max-height: 9rem;
     resize: none;
+    border: 0;
+    background: transparent;
+    padding: 0.25rem 0;
+    font-size: 0.92rem;
+    line-height: 1.45;
+    outline: none;
+  }
+  .sv-compose-shell button {
+    padding: 0.4rem 0.85rem;
+    font-size: 0.82rem;
   }
 
   /* Generic form view (used by Add friend / Settings / etc.). */
@@ -990,5 +1134,172 @@
     padding: 0.3rem 0.55rem;
     font-family: inherit;
     font-size: 0.85rem;
+  }
+
+  /* Welcome quick-start rows (replaces the empty centered CTA). */
+  .sv-welcome {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    padding: 2rem 1.5rem;
+    gap: 1rem;
+  }
+  .sv-welcome-title {
+    font-size: 1.4rem;
+    font-weight: 600;
+    color: var(--color-sv-text-strong);
+    letter-spacing: -0.01em;
+    margin: 0;
+  }
+  .sv-welcome-sub {
+    margin: 0 0 0.5rem;
+    color: var(--color-sv-text-muted);
+    max-width: 28rem;
+    text-align: center;
+    line-height: 1.55;
+  }
+  .sv-welcome-quick {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    width: 100%;
+    max-width: 22rem;
+  }
+  .sv-quick-row {
+    display: flex;
+    align-items: center;
+    gap: 0.85rem;
+    padding: 0.85rem 1rem;
+    background: var(--color-sv-bg);
+    border: 1px solid var(--color-sv-border);
+    border-radius: 10px;
+    cursor: pointer;
+    text-align: start;
+    font-family: inherit;
+    color: var(--color-sv-text);
+    width: 100%;
+    transition:
+      background 0.12s ease,
+      border-color 0.12s ease;
+  }
+  .sv-quick-row:hover {
+    background: var(--color-sv-hover-bg);
+    border-color: var(--color-sv-text-muted);
+    opacity: 1;
+  }
+  .sv-quick-row:focus-visible {
+    outline: 2px solid var(--color-sv-text);
+    outline-offset: 1px;
+  }
+  .sv-quick-icon {
+    flex: 0 0 auto;
+    width: 1.6rem;
+    height: 1.6rem;
+    color: var(--color-sv-text-muted);
+  }
+  .sv-quick-icon svg {
+    width: 100%;
+    height: 100%;
+    stroke: currentColor;
+    fill: none;
+  }
+  .sv-quick-text {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    min-width: 0;
+  }
+  .sv-quick-title {
+    color: var(--color-sv-text-strong);
+    font-weight: 500;
+    font-size: 0.9rem;
+  }
+  .sv-quick-sub {
+    color: var(--color-sv-text-muted);
+    font-size: 0.75rem;
+  }
+
+  /* Unread state on friend/chat rows. */
+  .sv-row[data-unread="true"] .sv-row-title {
+    color: var(--color-sv-text-strong);
+    font-weight: 600;
+  }
+  .sv-unread-badge {
+    flex: 0 0 auto;
+    min-width: 1.2rem;
+    height: 1.2rem;
+    padding: 0 0.4rem;
+    border-radius: 9999px;
+    background: var(--color-sv-text-strong);
+    color: var(--color-sv-bg);
+    font-size: 0.68rem;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-inline-start: auto;
+    line-height: 1;
+  }
+
+  /* Per-side photo block (Side settings → Photo). */
+  .sv-photo-block {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.5rem 0;
+  }
+  .sv-photo-preview {
+    width: 4.5rem;
+    height: 4.5rem;
+    border-radius: 30%;
+    overflow: hidden;
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--color-sv-surface);
+    border: 1px solid var(--color-sv-border);
+  }
+  .sv-photo-preview img,
+  .sv-photo-preview .sv-avatar {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    border-radius: inherit;
+  }
+  .sv-photo-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+  .sv-photo-actions button {
+    align-self: flex-start;
+    padding: 0.35rem 0.75rem;
+    font-size: 0.78rem;
+  }
+
+  /* Photo avatar variants — when an actual image is set the .sv-avatar
+   * loses its centered-initials styling and just shows the bitmap. */
+  .sv-avatar[data-has-photo="true"] {
+    background: transparent;
+    color: transparent;
+    overflow: hidden;
+  }
+  .sv-avatar[data-has-photo="true"] > img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: inherit;
+  }
+
+  /* "Copy invite link" button — gets its own slot for clarity. */
+  .sv-invite-actions {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    flex-wrap: wrap;
   }
 }

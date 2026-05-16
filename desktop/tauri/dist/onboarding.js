@@ -115,18 +115,16 @@
     document.getElementById("ob-next-1").onclick = () => showStep(2);
 
     document.getElementById("ob-back-2").onclick = () => showStep(1);
-    document.getElementById("ob-next-2").onclick = () => {
+    document.getElementById("ob-next-2").onclick = async () => {
+      // Stage D Layer 1: combine "create your first side" into the
+      // data-dir confirmation. Every new install gets a side labeled
+      // "personal" automatically — the user can rename or add more
+      // sides later from Settings.
       const v = ddInput.value.trim();
       if (!v) return;
       state.dataDir = v;
-      showStep(3);
-    };
-
-    document.getElementById("ob-back-3").onclick = () => showStep(2);
-    document.getElementById("ob-next-3").onclick = async () => {
       showError("ob-side-error", "");
-      const label =
-        document.getElementById("ob-side-label").value.trim() || "work";
+      const label = "personal";
       try {
         const info = await invoke("start_node", {
           dataDir: state.dataDir,
@@ -136,11 +134,15 @@
         state.sideAddress = info.side_address;
         const finalAddr = document.getElementById("ob-final-address");
         if (finalAddr) finalAddr.value = info.side_address;
+        // Pre-fill the backup filename so step 4 opens with a sensible
+        // default + the destination preview visible.
         const backupFn = document.getElementById("ob-backup-filename");
         if (backupFn && !backupFn.value) {
           backupFn.value = `${label}-seed.bin`;
+          backupFn.dispatchEvent(new Event("input"));
         }
-        // Persist label so the Stage C UI can render it on the avatar.
+        // Persist last_active_side so the chat shell renders the new
+        // side as the active rail avatar on first boot.
         try {
           await invoke("set_setting", {
             dataDir: state.dataDir,
@@ -152,43 +154,122 @@
         }
         showStep(4);
       } catch (e) {
-        showError("ob-side-error", `Couldn't create side: ${e}`);
+        showError("ob-side-error", `Couldn't create your personal side: ${e}`);
+        // Surface the error visibly even though #ob-side-error is
+        // hidden in the new flow — drop it inline above the data-dir
+        // input so the user sees it.
+        const sink = document.getElementById("ob-side-error");
+        if (sink) sink.hidden = false;
       }
     };
 
-    document.getElementById("ob-back-4").onclick = () => showStep(3);
+    // Backup step (data-screen="4") now reverts to data-screen="2"
+    // because the label-picker is gone.
+    document.getElementById("ob-back-4").onclick = () => showStep(2);
+
+    // ---- Step 4 live-validation wiring -----------------------------
+    // The Save button enables only when filename + passphrase
+    // (≥8 chars) + matching confirm are all present. The match
+    // indicator updates as the user types so they don't have to
+    // submit to find out something's wrong. The destination preview
+    // shows the full path the encrypted file will land at.
+    const fnEl = document.getElementById("ob-backup-filename");
+    const ppEl = document.getElementById("ob-backup-passphrase");
+    const cfEl = document.getElementById("ob-backup-passphrase-confirm");
+    const saveBtn = document.getElementById("ob-save-seed");
+    const matchEl = document.getElementById("ob-backup-match");
+    const destEl = document.getElementById("ob-backup-dest");
+
+    function t(key) {
+      const i = window.__sv_i18n;
+      return i && typeof i.t === "function" ? i.t(key) : key;
+    }
+
+    function updateBackupForm() {
+      const filename = (fnEl.value || "").trim();
+      const pp = ppEl.value || "";
+      const cf = cfEl.value || "";
+
+      // Destination preview.
+      if (destEl) {
+        if (filename) {
+          destEl.textContent = `${state.dataDir}/backups/${filename}`;
+        } else {
+          destEl.textContent = t("onboard.backup.dest_hint");
+        }
+      }
+
+      // Match indicator. Only shows once the user has typed in confirm.
+      if (matchEl) {
+        if (!cf) {
+          matchEl.textContent = "";
+          matchEl.classList.remove("ok", "bad");
+        } else if (pp === cf) {
+          matchEl.textContent = t("onboard.backup.match_yes");
+          matchEl.classList.add("ok");
+          matchEl.classList.remove("bad");
+        } else {
+          matchEl.textContent = t("onboard.backup.match_no");
+          matchEl.classList.add("bad");
+          matchEl.classList.remove("ok");
+        }
+      }
+
+      // Enable Save only when everything's valid.
+      const valid =
+        filename.length > 0 && pp.length >= 8 && pp === cf;
+      saveBtn.disabled = !valid;
+    }
+
+    fnEl.addEventListener("input", updateBackupForm);
+    ppEl.addEventListener("input", updateBackupForm);
+    cfEl.addEventListener("input", updateBackupForm);
+    // Initialize once on each entry to step 4.
+    updateBackupForm();
+
     document.getElementById("ob-save-seed").onclick = async () => {
       showError("ob-backup-error", "");
       const okEl = document.getElementById("ob-backup-ok");
       if (okEl) okEl.textContent = "";
-      const filename = document.getElementById("ob-backup-filename").value.trim();
-      const passphrase = document.getElementById("ob-backup-passphrase").value;
-      const confirm = document.getElementById("ob-backup-passphrase-confirm").value;
-      if (!filename) {
-        showError("ob-backup-error", "Choose a filename.");
-        return;
-      }
-      if (!passphrase) {
-        showError("ob-backup-error", "Set a passphrase to encrypt the backup.");
-        return;
-      }
-      if (passphrase !== confirm) {
-        showError("ob-backup-error", "Passphrases do not match.");
-        return;
-      }
+      const filename = fnEl.value.trim();
+      const passphrase = ppEl.value;
       try {
         const written = await invoke("write_seed_backup", {
           dataDir: state.dataDir,
           filename,
           passphrase,
         });
-        if (okEl) okEl.textContent = `Saved (encrypted) to: ${written}`;
+        if (okEl) {
+          okEl.textContent = `${t("onboard.backup.saved_at")} ${written}`;
+        }
         state.seedBackedUp = true;
         document.getElementById("ob-next-4").disabled = false;
+        // Clear the passphrase inputs from memory once they've been
+        // consumed; the user can't recover the file without the
+        // passphrase they typed, but we don't need to keep it in the
+        // input element either.
+        ppEl.value = "";
+        cfEl.value = "";
+        updateBackupForm();
       } catch (e) {
-        showError("ob-backup-error", `Couldn't write seed: ${e}`);
+        showError("ob-backup-error", `${t("onboard.backup.write_failed")} ${e}`);
       }
     };
+    const skipBtn = document.getElementById("ob-skip-backup");
+    if (skipBtn) {
+      skipBtn.onclick = async () => {
+        const ok = await window.svConfirm(
+          t("onboard.backup.skip_confirm") ||
+            "Without a recovery file, losing this device means losing this identity (unless you pair another device first). You can back up later from Settings → Backup. Skip for now?",
+          { title: "Skip backup?", okLabel: "Skip for now", danger: true },
+        );
+        if (!ok) return;
+        state.seedBackedUp = true;
+        const okEl = document.getElementById("ob-backup-ok");
+        if (okEl) okEl.textContent = t("onboard.backup.skipped");
+        document.getElementById("ob-next-4").disabled = false;
+      };
+    }
     document.getElementById("ob-next-4").onclick = () => {
       if (!state.seedBackedUp) return;
       showStep(5);

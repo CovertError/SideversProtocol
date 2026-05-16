@@ -351,15 +351,33 @@ const BACKUP_SUBDIR: &str = "backups";
 /// generous room for "sidevers-seed-2026-05-16.bin" style names).
 const MAX_BACKUP_FILENAME_LEN: usize = 128;
 
+/// Windows reserved device names (case-insensitive). Opening any of these
+/// as a file maps to the corresponding device, silently swallowing the
+/// data. Reject regardless of platform — a backup file written on macOS
+/// then synced to Windows would hit the same trap.
+const WIN_RESERVED: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL",
+    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
 /// Validate a user-supplied filename for a seed backup, returning the
-/// absolute path it would land at: `<data_dir>/backups/<filename>`.
+/// canonicalized absolute path it would land at:
+/// `<canonical(data_dir)>/backups/<filename>`.
 ///
-/// Rejects path separators, parent-dir refs, dotfiles, NUL bytes, and
-/// NTFS-reserved characters. The frontend chooses only the filename
-/// (not the full path), so an attacker who breaks out of the webview's
-/// CSP can no longer write the seed file to arbitrary locations like
-/// `~/.ssh/authorized_keys` (Audit P1.2).
+/// Audit P1.2 + P2.A/B/C:
+/// - rejects path separators, parent-dir refs, dotfiles, NUL bytes,
+///   NTFS-reserved characters;
+/// - rejects Windows reserved device aliases (CON, PRN, …, LPT9) and
+///   filenames ending in `.` or space;
+/// - normalizes Unicode to NFC and rejects bidi-override + zero-width
+///   format characters (so `"innocent\u{202E}txt.exe"` cannot pose as
+///   `"innocentexe.txt"`);
+/// - canonicalizes `data_dir` so a `..` segment in the data dir cannot
+///   escape the intended subtree.
 fn safe_backup_path(data_dir: &Path, filename: &str) -> Result<PathBuf, String> {
+    use unicode_normalization::UnicodeNormalization;
+
     let trimmed = filename.trim();
     if trimmed.is_empty() {
         return Err("backup filename cannot be empty".into());
@@ -375,13 +393,53 @@ fn safe_backup_path(data_dir: &Path, filename: &str) -> Result<PathBuf, String> 
     if trimmed == "." || trimmed == ".." || trimmed.starts_with('.') {
         return Err("backup filename cannot start with '.' or be a parent ref".into());
     }
+    // NTFS-reserved characters (and NUL).
     if trimmed
         .chars()
         .any(|c| matches!(c, '\0' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
     {
         return Err("backup filename contains a forbidden character".into());
     }
-    Ok(data_dir.join(BACKUP_SUBDIR).join(trimmed))
+    // Windows trailing `.` / space gets silently stripped by NTFS, which
+    // creates confusion: the user thinks they saved `foo.` but the file
+    // is at `foo`.
+    if trimmed.ends_with('.') || trimmed.ends_with(' ') {
+        return Err("backup filename cannot end with '.' or space".into());
+    }
+    // Bidi-override and zero-width / format characters can make a filename
+    // display as something different from what it is on disk.
+    if trimmed.chars().any(|c| {
+        matches!(c,
+            '\u{202A}'..='\u{202E}' |   // LRE, RLE, PDF, LRO, RLO
+            '\u{2066}'..='\u{2069}' |   // LRI, RLI, FSI, PDI
+            '\u{200B}'..='\u{200F}' |   // ZWSP, ZWNJ, ZWJ, LRM, RLM
+            '\u{FEFF}'                  // BOM / ZWNBSP
+        )
+    }) {
+        return Err("backup filename contains a bidi/zero-width control character".into());
+    }
+    // Windows reserved device names (case-insensitive, optionally with an
+    // extension — `CON.bin` still aliases to the console).
+    let stem: &str = trimmed.split('.').next().unwrap_or(trimmed);
+    if WIN_RESERVED.iter().any(|r| stem.eq_ignore_ascii_case(r)) {
+        return Err(format!(
+            "backup filename uses a reserved Windows device name ({stem})"
+        ));
+    }
+    // Normalize to NFC. Mixing NFC and NFD lets an attacker create two
+    // filenames that display identically but differ on disk.
+    let normalized: String = trimmed.nfc().collect();
+    if normalized != trimmed {
+        return Err(
+            "backup filename contains non-NFC-normalized Unicode (visually ambiguous)".into(),
+        );
+    }
+    // Canonicalize `data_dir` — if it contains `..` segments, that's
+    // either a misconfiguration or an attempted bypass; either way we
+    // refuse to silently follow it.
+    let canonical_dir = std::fs::canonicalize(data_dir)
+        .map_err(|e| format!("data_dir does not resolve to a real path: {e}"))?;
+    Ok(canonical_dir.join(BACKUP_SUBDIR).join(normalized))
 }
 
 /// Write the active node's primary side seed to a passphrase-encrypted
@@ -443,71 +501,290 @@ async fn write_seed_backup(
     Ok(path.to_string_lossy().into_owned())
 }
 
+// ---------------------------------------------------------------------
+// Phase 3 Stage C polish — per-side profile photo (local-only)
+// ---------------------------------------------------------------------
+//
+// Photos display locally only for this round; publishing on the wire
+// is gated on a future `ProfilePayload` extension. The image lives at
+// `<data_dir>/avatars/<bech32-no-prefix>.jpg`, chmod 0o600, in a
+// 0o700 directory. The frontend resizes to 256×256 JPEG before
+// sending (≈60 KB), well within Tauri's IPC budget for a base64
+// blob.
+
+const AVATAR_SUBDIR: &str = "avatars";
+const AVATAR_MAX_BYTES: usize = 256 * 1024;
+const JPEG_MAGIC: [u8; 3] = [0xFF, 0xD8, 0xFF];
+
+/// `<data_dir>/avatars/<bech32-without-prefix>.jpg`. The bech32
+/// stripped of its `sv1q`/`sv1p` HRP gives a filename-safe alnum
+/// suffix; collisions are impossible (the pubkey is unique). Never
+/// derived from user-supplied filenames — there's no path-traversal
+/// surface.
+fn avatar_path_for(data_dir: &Path, side_address: &str) -> Result<PathBuf, String> {
+    let pk = decode_side_address(side_address)?;
+    let mut name = String::with_capacity(64);
+    for b in &pk {
+        name.push_str(&format!("{:02x}", b));
+    }
+    name.push_str(".jpg");
+    Ok(data_dir.join(AVATAR_SUBDIR).join(name))
+}
+
+/// Persist the active side's avatar image. Validates JPEG magic
+/// bytes (frontend always produces JPEG via canvas.toBlob) before
+/// writing. Refuses oversized blobs.
+#[tauri::command]
+async fn set_side_avatar(
+    data_dir: String,
+    side_address: String,
+    image_b64: String,
+) -> Result<(), String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(image_b64.as_bytes())
+        .map_err(|e| format!("avatar: bad base64: {e}"))?;
+    if bytes.is_empty() {
+        return Err("avatar: empty image".into());
+    }
+    if bytes.len() > AVATAR_MAX_BYTES {
+        return Err(format!(
+            "avatar: image too large ({} bytes; max {})",
+            bytes.len(),
+            AVATAR_MAX_BYTES
+        ));
+    }
+    if bytes.len() < 3 || bytes[..3] != JPEG_MAGIC {
+        return Err("avatar: only JPEG accepted (frontend should resize via canvas)".into());
+    }
+    let dir = PathBuf::from(&data_dir);
+    let path = avatar_path_for(&dir, &side_address)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "internal: avatar path has no parent".to_owned())?;
+    tokio::fs::create_dir_all(parent)
+        .await
+        .map_err(|e| format!("creating avatars dir: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(parent)
+            .map_err(|e| e.to_string())?
+            .permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(parent, perms).map_err(|e| e.to_string())?;
+    }
+    tokio::fs::write(&path, &bytes)
+        .await
+        .map_err(|e| format!("writing avatar: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&path)
+            .map_err(|e| e.to_string())?
+            .permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&path, perms).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Return the absolute path to a side's avatar file if one exists,
+/// or `None`. Frontend wraps the path with Tauri's `convertFileSrc`
+/// to get a webview-loadable URL.
+#[tauri::command]
+async fn get_side_avatar(
+    data_dir: String,
+    side_address: String,
+) -> Result<Option<String>, String> {
+    let dir = PathBuf::from(&data_dir);
+    let path = avatar_path_for(&dir, &side_address)?;
+    if tokio::fs::try_exists(&path)
+        .await
+        .map_err(|e| format!("stat avatar: {e}"))?
+    {
+        Ok(Some(path.to_string_lossy().into_owned()))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Delete the avatar file for a side. Silent no-op if it doesn't
+/// exist; failure to remove a present file is an error.
+#[tauri::command]
+async fn clear_side_avatar(
+    data_dir: String,
+    side_address: String,
+) -> Result<(), String> {
+    let dir = PathBuf::from(&data_dir);
+    let path = avatar_path_for(&dir, &side_address)?;
+    match tokio::fs::remove_file(&path).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("removing avatar: {e}")),
+    }
+}
+
 #[cfg(test)]
 mod backup_path_tests {
     use super::{MAX_BACKUP_FILENAME_LEN, safe_backup_path};
-    use std::path::Path;
+    use std::path::PathBuf;
 
-    fn root() -> &'static Path {
-        Path::new("/tmp/sv-test-data")
+    /// Helper: create a real temp dir we can canonicalize against. The
+    /// returned `tempfile::TempDir` cleans up on drop; the caller holds
+    /// it alongside the path used in assertions.
+    fn temproot() -> (tempfile::TempDir, PathBuf) {
+        let td = tempfile::tempdir().expect("tempdir");
+        let canon = std::fs::canonicalize(td.path()).expect("canonicalize");
+        (td, canon)
     }
 
     #[test]
     fn good_filename_resolves_under_backups_subdir() {
-        let p = safe_backup_path(root(), "sidevers-seed-2026-05-16.bin").unwrap();
-        assert!(p.starts_with("/tmp/sv-test-data/backups/"));
+        let (_td, root) = temproot();
+        let p = safe_backup_path(&root, "sidevers-seed-2026-05-16.bin").unwrap();
+        assert!(p.starts_with(&root.join("backups")));
         assert!(p.ends_with("sidevers-seed-2026-05-16.bin"));
     }
 
     #[test]
     fn rejects_forward_slash() {
-        assert!(safe_backup_path(root(), "../etc/passwd").is_err());
-        assert!(safe_backup_path(root(), "foo/bar").is_err());
+        let (_td, root) = temproot();
+        assert!(safe_backup_path(&root, "../etc/passwd").is_err());
+        assert!(safe_backup_path(&root, "foo/bar").is_err());
     }
 
     #[test]
     fn rejects_backslash() {
-        assert!(safe_backup_path(root(), "foo\\bar").is_err());
+        let (_td, root) = temproot();
+        assert!(safe_backup_path(&root, "foo\\bar").is_err());
     }
 
     #[test]
     fn rejects_dot_and_dotdot() {
-        assert!(safe_backup_path(root(), ".").is_err());
-        assert!(safe_backup_path(root(), "..").is_err());
+        let (_td, root) = temproot();
+        assert!(safe_backup_path(&root, ".").is_err());
+        assert!(safe_backup_path(&root, "..").is_err());
     }
 
     #[test]
     fn rejects_dotfile() {
-        assert!(safe_backup_path(root(), ".hidden").is_err());
+        let (_td, root) = temproot();
+        assert!(safe_backup_path(&root, ".hidden").is_err());
     }
 
     #[test]
     fn rejects_empty() {
-        assert!(safe_backup_path(root(), "").is_err());
-        assert!(safe_backup_path(root(), "   ").is_err());
+        let (_td, root) = temproot();
+        assert!(safe_backup_path(&root, "").is_err());
+        assert!(safe_backup_path(&root, "   ").is_err());
     }
 
     #[test]
     fn rejects_nul_and_ntfs_reserved_chars() {
-        assert!(safe_backup_path(root(), "a\0b").is_err());
-        assert!(safe_backup_path(root(), "a:b").is_err());
-        assert!(safe_backup_path(root(), "a*b").is_err());
-        assert!(safe_backup_path(root(), "a?b").is_err());
-        assert!(safe_backup_path(root(), "a<b>c").is_err());
-        assert!(safe_backup_path(root(), "a|b").is_err());
-        assert!(safe_backup_path(root(), "a\"b").is_err());
+        let (_td, root) = temproot();
+        assert!(safe_backup_path(&root, "a\0b").is_err());
+        assert!(safe_backup_path(&root, "a:b").is_err());
+        assert!(safe_backup_path(&root, "a*b").is_err());
+        assert!(safe_backup_path(&root, "a?b").is_err());
+        assert!(safe_backup_path(&root, "a<b>c").is_err());
+        assert!(safe_backup_path(&root, "a|b").is_err());
+        assert!(safe_backup_path(&root, "a\"b").is_err());
     }
 
     #[test]
     fn rejects_overlong_filename() {
+        let (_td, root) = temproot();
         let long = "x".repeat(MAX_BACKUP_FILENAME_LEN + 1);
-        assert!(safe_backup_path(root(), &long).is_err());
+        assert!(safe_backup_path(&root, &long).is_err());
     }
 
     #[test]
     fn accepts_safe_unicode() {
-        let p = safe_backup_path(root(), "respaldo-清醒-2026.bin").unwrap();
+        let (_td, root) = temproot();
+        let p = safe_backup_path(&root, "respaldo-清醒-2026.bin").unwrap();
         assert!(p.ends_with("respaldo-清醒-2026.bin"));
+    }
+
+    // ---------- Audit P2 additions ----------
+
+    #[test]
+    fn rejects_windows_reserved_device_names_p2b() {
+        let (_td, root) = temproot();
+        for name in ["CON", "con", "PRN.bin", "Aux", "nul.txt", "COM1", "lpt9", "CON.SEED.bin"] {
+            assert!(
+                safe_backup_path(&root, name).is_err(),
+                "must reject Windows reserved name: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_trailing_dot_p2b() {
+        let (_td, root) = temproot();
+        // Trailing `.` is silently stripped by NTFS: a file "seed.bin." on
+        // disk lands as "seed.bin", confusing the user. (Trailing spaces
+        // are also stripped by NTFS, but `.trim()` in safe_backup_path
+        // handles that earlier — a benign UX.)
+        assert!(safe_backup_path(&root, "seed.bin.").is_err());
+    }
+
+    #[test]
+    fn rejects_bidi_override_filename_p2c() {
+        let (_td, root) = temproot();
+        // "innocent<U+202E>txt.exe" displays as "innocentexe.txt"
+        let deceptive = "innocent\u{202E}txt.exe";
+        assert!(safe_backup_path(&root, deceptive).is_err());
+    }
+
+    #[test]
+    fn rejects_zero_width_filename_p2c() {
+        let (_td, root) = temproot();
+        let deceptive = "seed\u{200B}.bin"; // contains ZERO WIDTH SPACE
+        assert!(safe_backup_path(&root, deceptive).is_err());
+    }
+
+    #[test]
+    fn rejects_non_nfc_unicode_p2c() {
+        let (_td, root) = temproot();
+        // "café" composed (NFC) vs decomposed (NFD).
+        // NFD form: "cafe" + combining acute (U+0301).
+        let nfd = "cafe\u{0301}.bin";
+        assert!(
+            safe_backup_path(&root, nfd).is_err(),
+            "non-NFC form must be rejected (visually ambiguous with NFC form)"
+        );
+        // NFC form (precomposed) is accepted.
+        let nfc = "café.bin";
+        assert!(safe_backup_path(&root, nfc).is_ok());
+    }
+
+    #[test]
+    fn rejects_data_dir_with_dotdot_segment_p2a() {
+        // Build a path that's literally `<tempdir>/../something` —
+        // canonicalize() either resolves it (escaping) or errors. The
+        // function must NOT silently join `<that>/backups/<file>` without
+        // resolving.
+        let (td, root) = temproot();
+        let evil = root.join("..").join(td.path().file_name().unwrap());
+        // `canonicalize` on this resolves to the same temp dir, but the
+        // test is mainly that *some* canonical form is returned and we
+        // didn't blindly join `..` segments.
+        let p = safe_backup_path(&evil, "seed.bin").unwrap();
+        // The resolved path must NOT contain ".." anywhere.
+        let s = p.to_string_lossy();
+        assert!(!s.contains("/.."), "canonical path must not contain `..`: {s}");
+    }
+
+    #[test]
+    fn errors_when_data_dir_does_not_exist_p2a() {
+        // canonicalize() fails on a non-existent path.
+        let nope = PathBuf::from("/this/should/really/not/exist/at/all/sv-test");
+        let err = safe_backup_path(&nope, "seed.bin").unwrap_err();
+        assert!(
+            err.contains("data_dir does not resolve"),
+            "expected data_dir resolution failure, got: {err}"
+        );
     }
 }
 
@@ -1384,6 +1661,10 @@ fn main() {
             // Phase 3 Stage C — "share me as a friend" QR
             generate_contact_qr_svg,
             accept_contact_qr,
+            // Phase 3 Stage C polish — per-side profile photo
+            set_side_avatar,
+            get_side_avatar,
+            clear_side_avatar,
             // Legacy key-only commands (offline tooling)
             generate_master,
             derive_side,

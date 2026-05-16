@@ -42,12 +42,55 @@ const state = {
   sideLabels: new Map(),
   // friendDisplay : Map<peerAddr, {name, address}> — last-known display name
   friendDisplay: new Map(),
+  // lastReadAt : Map<"side|peer", received_at> — when the user last
+  // looked at this thread. Used to compute unread state. In-memory MVP.
+  lastReadAt: new Map(),
+  // sidePhotoUrls : Map<sideAddress, Tauri-converted-file-url> for the
+  // local-only profile photo per side. None means initials fallback.
+  sidePhotoUrls: new Map(),
   view: { name: "welcome", params: {} },
   // Add-friend tab state
   addFriendTab: "share",
   advancedMode: false,
   theme: "system",
 };
+
+// Presence + unread helpers.
+const PRESENCE_WINDOW_S = 300;
+
+function lastInboxFrom(side, peer) {
+  const msgs = state.chats.get(side)?.get(peer);
+  if (!msgs || msgs.length === 0) return 0;
+  // Walk back to find the last received message (kind === "in").
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].kind === "in") return msgs[i].received_at || 0;
+  }
+  return 0;
+}
+
+function isPeerOnline(side, peer) {
+  const last = lastInboxFrom(side, peer);
+  if (!last) return false;
+  const now = Math.floor(Date.now() / 1000);
+  return now - last < PRESENCE_WINDOW_S;
+}
+
+function unreadCount(side, peer) {
+  const msgs = state.chats.get(side)?.get(peer) || [];
+  const cutoff = state.lastReadAt.get(sessionKey(side, peer)) || 0;
+  let n = 0;
+  for (const m of msgs) {
+    if (m.kind === "in" && (m.received_at || 0) > cutoff) n++;
+  }
+  return n;
+}
+
+function markRead(side, peer) {
+  state.lastReadAt.set(
+    sessionKey(side, peer),
+    Math.floor(Date.now() / 1000),
+  );
+}
 
 // =====================================================================
 // Helpers
@@ -121,15 +164,23 @@ function avatarInitials(label) {
   return [...trimmed].slice(0, 2).join("").toUpperCase();
 }
 
+// 12 monochrome buckets across the brand's sv-ink → sv-silver range.
+// White text legible on every bucket. Hashed-from-address indexing
+// gives different sides/friends visibly different shades while
+// holding brand monochrome.
 const AVATAR_PALETTE = [
+  "#0a0a0c",
+  "#15151a",
   "#1d1d1f",
+  "#26262a",
+  "#2f2f32",
   "#3a3a3c",
-  "#545454",
-  "#6e6e73",
-  "#86868b",
-  "#2c2c2e",
   "#48484a",
+  "#545454",
   "#5a5a5e",
+  "#6e6e73",
+  "#7a7a7f",
+  "#86868b",
 ];
 
 function avatarColor(address) {
@@ -143,11 +194,61 @@ function avatarColor(address) {
   return AVATAR_PALETTE[h % AVATAR_PALETTE.length];
 }
 
+// Tauri's convertFileSrc lets the webview load a filesystem path via
+// a `tauri://localhost/...` URL. Falls back to a `file://` URL if the
+// global isn't there (test env).
+function fileSrc(path) {
+  const c = tauri?.core?.convertFileSrc;
+  if (typeof c === "function") return c(path);
+  return path.startsWith("/") ? `file://${path}` : path;
+}
+
 function applyAvatar(el, address, label) {
   if (!el) return;
-  el.textContent = avatarInitials(label || sideLabel(address) || "—");
-  el.style.background = avatarColor(address);
-  el.style.color = "#fff";
+  const cached = state.sidePhotoUrls.get(address);
+  if (cached) {
+    // Photo set — replace initials with an <img>. Keep the background
+    // transparent so the bitmap fills the avatar fully.
+    el.textContent = "";
+    el.dataset.hasPhoto = "true";
+    el.style.background = "transparent";
+    let img = el.querySelector("img");
+    if (!img) {
+      img = document.createElement("img");
+      el.appendChild(img);
+    }
+    if (img.src !== cached) img.src = cached;
+    img.alt = label || sideLabel(address) || "";
+  } else {
+    // No photo — render initials with a deterministic monochrome fill.
+    delete el.dataset.hasPhoto;
+    el.innerHTML = "";
+    el.textContent = avatarInitials(label || sideLabel(address) || "—");
+    el.style.background = avatarColor(address);
+    el.style.color = "#fff";
+  }
+}
+
+// Look up and cache the side's photo URL. Returns true if a photo
+// was found (and triggers a re-render of the affected surfaces);
+// false if none. Failures are silent — initials remain the fallback.
+async function refreshSidePhoto(address) {
+  if (!state.dataDir || !address) return false;
+  try {
+    const path = await call("get_side_avatar", {
+      dataDir: state.dataDir,
+      sideAddress: address,
+    });
+    if (path) {
+      state.sidePhotoUrls.set(address, fileSrc(path));
+      return true;
+    }
+    state.sidePhotoUrls.delete(address);
+    return false;
+  } catch (e) {
+    console.warn("get_side_avatar failed:", e);
+    return false;
+  }
 }
 
 function sideLabel(address) {
@@ -198,6 +299,9 @@ window.svBoot = async function svBoot(nodeInfo, dataDir) {
   applyAdvanced(state.advancedMode);
 
   await refreshSides();
+  // Best-effort prefetch of every side's photo so rail + inside-header
+  // paint with the right avatar on the first render.
+  await Promise.all(state.sides.map((s) => refreshSidePhoto(s.side_address)));
   await refreshFriends(state.activeSide);
   await loadInboxHistory(state.activeSide);
 
@@ -278,9 +382,15 @@ async function refreshSides() {
       state.sideLabels.set(s.side_address, sideLabel(s.side_address) || shortenAddr(s.side_address));
     }
   }
-  // If activeSide isn't in the list (e.g. just retired), pick another.
-  if (state.activeSide && !state.sides.some((s) => s.side_address === state.activeSide)) {
-    const replacement = state.sides.find((s) => !s.is_retired) || state.sides[0];
+  // Switch activeSide off any side that is missing OR has been retired.
+  // The retired side stays hosted (so it can still receive replies) but
+  // the UI should not present it as the active identity any more.
+  const active = state.activeSide
+    ? state.sides.find((s) => s.side_address === state.activeSide)
+    : null;
+  if (state.activeSide && (!active || active.is_retired)) {
+    const replacement =
+      state.sides.find((s) => !s.is_retired) || null;
     state.activeSide = replacement?.side_address || null;
     if (state.activeSide) await saveSetting("last_active_side", state.activeSide);
   }
@@ -290,7 +400,11 @@ function renderRail() {
   const ul = $("side-rail");
   if (!ul) return;
   ul.innerHTML = "";
-  for (const s of state.sides) {
+  // Hide retired sides from the rail. The Rust side keeps them hosted
+  // (lifecycle: Retired) so any in-flight replies can still arrive, but
+  // they shouldn't appear as a switchable identity in the UI.
+  const visible = state.sides.filter((s) => !s.is_retired);
+  for (const s of visible) {
     const li = document.createElement("li");
     const btn = document.createElement("button");
     btn.className = "sv-rail-btn";
@@ -431,17 +545,26 @@ function renderFriendsList(friends) {
     const li = document.createElement("li");
     const btn = document.createElement("button");
     btn.className = "sv-row";
+    const unread = unreadCount(state.activeSide, r.address);
     if (
       state.view.name === "thread" &&
       state.view.params.peer === r.address
     ) {
       btn.setAttribute("data-active", "true");
     }
+    if (unread > 0) btn.setAttribute("data-unread", "true");
 
+    const wrap = document.createElement("span");
+    wrap.className = "sv-avatar-wrap";
     const av = document.createElement("span");
     av.className = "sv-avatar sv-avatar-sm";
     applyAvatar(av, r.address, r.nickname || friendDisplayFor(r.address));
-    btn.appendChild(av);
+    wrap.appendChild(av);
+    const pres = document.createElement("span");
+    pres.className = "sv-avatar-presence";
+    if (isPeerOnline(state.activeSide, r.address)) pres.classList.add("online");
+    wrap.appendChild(pres);
+    btn.appendChild(wrap);
 
     const body = document.createElement("div");
     body.className = "sv-row-body";
@@ -454,6 +577,13 @@ function renderFriendsList(friends) {
     body.appendChild(title);
     body.appendChild(sub);
     btn.appendChild(body);
+
+    if (unread > 0) {
+      const badge = document.createElement("span");
+      badge.className = "sv-unread-badge";
+      badge.textContent = unread > 99 ? "99+" : String(unread);
+      btn.appendChild(badge);
+    }
 
     btn.onclick = () => openThread(r.address);
     li.appendChild(btn);
@@ -476,17 +606,26 @@ function renderChatsList(rows) {
     const li = document.createElement("li");
     const btn = document.createElement("button");
     btn.className = "sv-row";
+    const unread = unreadCount(state.activeSide, row.peer);
     if (
       state.view.name === "thread" &&
       state.view.params.peer === row.peer
     ) {
       btn.setAttribute("data-active", "true");
     }
+    if (unread > 0) btn.setAttribute("data-unread", "true");
 
+    const wrap = document.createElement("span");
+    wrap.className = "sv-avatar-wrap";
     const av = document.createElement("span");
     av.className = "sv-avatar sv-avatar-sm";
     applyAvatar(av, row.peer, friendDisplayFor(row.peer));
-    btn.appendChild(av);
+    wrap.appendChild(av);
+    const pres = document.createElement("span");
+    pres.className = "sv-avatar-presence";
+    if (isPeerOnline(state.activeSide, row.peer)) pres.classList.add("online");
+    wrap.appendChild(pres);
+    btn.appendChild(wrap);
 
     const body = document.createElement("div");
     body.className = "sv-row-body";
@@ -500,10 +639,17 @@ function renderChatsList(rows) {
     body.appendChild(sub);
     btn.appendChild(body);
 
-    const meta = document.createElement("span");
-    meta.className = "sv-row-meta";
-    meta.textContent = relativeTime(row.received_at);
-    btn.appendChild(meta);
+    if (unread > 0) {
+      const badge = document.createElement("span");
+      badge.className = "sv-unread-badge";
+      badge.textContent = unread > 99 ? "99+" : String(unread);
+      btn.appendChild(badge);
+    } else {
+      const meta = document.createElement("span");
+      meta.className = "sv-row-meta";
+      meta.textContent = relativeTime(row.received_at);
+      btn.appendChild(meta);
+    }
 
     btn.onclick = () => openThread(row.peer);
     li.appendChild(btn);
@@ -552,6 +698,8 @@ async function openThread(peerAddress) {
     return;
   }
   state.view = { name: "thread", params: { peer: peerAddress } };
+  // Mark the thread as read NOW so the unread badge clears on click.
+  markRead(state.activeSide, peerAddress);
   // Try to resolve endpoint + open session in the background.
   ensureSessionFor(state.activeSide, peerAddress);
   renderInside();
@@ -637,17 +785,64 @@ function renderThread(params) {
     return;
   }
 
+  // Slack/Discord-style author rows. Consecutive messages from the
+  // same author within GROUP_WINDOW_S group: the second-and-later
+  // hide their avatar + header, leaving just an indented body that
+  // visually attaches to the first message.
+  const GROUP_WINDOW_S = 300;
+  let prevFrom = null;
+  let prevTs = 0;
   for (const m of msgs) {
-    const bubble = document.createElement("div");
-    bubble.className =
-      "sv-bubble " + (m.kind === "out" ? "sv-bubble-sent" : "sv-bubble-received");
-    bubble.textContent = m.plaintext;
-    list.appendChild(bubble);
-    const meta = document.createElement("div");
-    meta.className =
-      "sv-bubble-meta" + (m.kind === "out" ? "" : " received");
-    meta.textContent = relativeTime(m.received_at);
-    list.appendChild(meta);
+    const sameAuthor = m.from === prevFrom;
+    const closeInTime = m.received_at - prevTs <= GROUP_WINDOW_S;
+    const grouped = sameAuthor && closeInTime;
+
+    const row = document.createElement("div");
+    row.className = "sv-msg" + (grouped ? " sv-msg-grouped" : "");
+
+    const slot = document.createElement("div");
+    slot.className = "sv-msg-avatar-slot";
+    if (!grouped) {
+      const author = m.kind === "out" ? state.activeSide : m.from;
+      const av = document.createElement("span");
+      av.className = "sv-avatar sv-avatar-sm";
+      applyAvatar(
+        av,
+        author,
+        m.kind === "out"
+          ? sideLabel(state.activeSide) || ""
+          : friendDisplayFor(m.from),
+      );
+      slot.appendChild(av);
+    }
+    row.appendChild(slot);
+
+    const content = document.createElement("div");
+    content.className = "sv-msg-content";
+    if (!grouped) {
+      const header = document.createElement("div");
+      header.className = "sv-msg-header";
+      const nameEl = document.createElement("span");
+      nameEl.className = "sv-msg-name";
+      nameEl.textContent =
+        m.kind === "out" ? t("msg.you") : friendDisplayFor(m.from);
+      const timeEl = document.createElement("span");
+      timeEl.className = "sv-msg-time";
+      timeEl.textContent = relativeTime(m.received_at);
+      header.appendChild(nameEl);
+      header.appendChild(timeEl);
+      content.appendChild(header);
+    }
+    const body = document.createElement("div");
+    body.className = "sv-msg-body";
+    body.textContent = m.plaintext;
+    content.appendChild(body);
+
+    row.appendChild(content);
+    list.appendChild(row);
+
+    prevFrom = m.from;
+    prevTs = m.received_at;
   }
   list.scrollTop = list.scrollHeight;
 }
@@ -763,6 +958,11 @@ async function renderSideSettings() {
     $("side-listen").value = side.listen_addr;
     $("side-lifecycle").value = side.lifecycle || "—";
   }
+  // Photo preview reflects the current cached avatar (initials or
+  // image). applyAvatar handles either case based on sidePhotoUrls.
+  const preview = $("side-photo-preview");
+  if (preview)
+    applyAvatar(preview, state.activeSide, sideLabel(state.activeSide));
   // Load profile.
   try {
     const p = await call("get_profile", { sideAddress: state.activeSide });
@@ -778,6 +978,68 @@ async function renderSideSettings() {
   } catch (e) {
     console.warn("get_profile failed:", e);
   }
+}
+
+// Frontend resize: pick an image file, decode via <img>, draw to a
+// 256×256 <canvas>, encode as JPEG q=0.85, base64 it, hand off to
+// `set_side_avatar`. The Rust side validates JPEG magic + size cap.
+async function uploadSidePhoto(file) {
+  if (!file || !state.activeSide || !state.dataDir) return;
+  const TARGET = 256;
+  const QUALITY = 0.85;
+
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error || new Error("read failed"));
+    reader.onload = () => resolve(reader.result);
+    reader.readAsDataURL(file);
+  });
+
+  const img = await new Promise((resolve, reject) => {
+    const i = new Image();
+    i.onerror = () => reject(new Error("not a valid image"));
+    i.onload = () => resolve(i);
+    i.src = dataUrl;
+  });
+
+  // Center-crop to a square, then scale to TARGET.
+  const side = Math.min(img.width, img.height);
+  const sx = (img.width - side) / 2;
+  const sy = (img.height - side) / 2;
+  const canvas = document.createElement("canvas");
+  canvas.width = TARGET;
+  canvas.height = TARGET;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(img, sx, sy, side, side, 0, 0, TARGET, TARGET);
+
+  const blob = await new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (b) => (b ? resolve(b) : reject(new Error("canvas.toBlob failed"))),
+      "image/jpeg",
+      QUALITY,
+    );
+  });
+  const buffer = await blob.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  // Convert bytes → base64 in chunks to avoid stack blowup on
+  // String.fromCharCode(...bytes).
+  let bin = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  const imageB64 = btoa(bin);
+
+  await call("set_side_avatar", {
+    dataDir: state.dataDir,
+    sideAddress: state.activeSide,
+    imageB64,
+  });
+  await refreshSidePhoto(state.activeSide);
+  // Re-render anywhere the avatar appears.
+  renderRail();
+  renderInside();
+  if (state.view.name === "side-settings") renderSideSettings();
 }
 
 // ----- Global settings view -----------------------------------------
@@ -814,12 +1076,17 @@ function onInboxDm(payload) {
     received_at: payload.received_at,
     kind: "in",
   });
-  renderInside();
-  if (
+  // If the message arrived while the user is actively viewing that
+  // thread, auto-mark-read so the unread badge never appears for it.
+  const isViewing =
     state.view.name === "thread" &&
     state.view.params.peer === peer &&
-    state.activeSide === sideAddr
-  ) {
+    state.activeSide === sideAddr;
+  if (isViewing) {
+    markRead(sideAddr, peer);
+  }
+  renderInside();
+  if (isViewing) {
     renderView();
   }
 }
@@ -863,8 +1130,13 @@ function attachStaticHandlers() {
   // Rail bottom actions.
   $("rail-add-side")?.addEventListener("click", () =>
     safe(async () => {
-      const label = prompt("New side label?", "extra") || "";
-      const trimmed = label.trim();
+      const raw = await window.svPrompt(
+        "Label for the new side (e.g. work, private, public).",
+        "extra",
+        { title: "New side", okLabel: "Create" },
+      );
+      if (raw == null) return;
+      const trimmed = String(raw).trim();
       if (!trimmed) return;
       const resp = await call("add_side", { label: trimmed });
       state.sideLabels.set(resp.side_address, trimmed);
@@ -890,6 +1162,16 @@ function attachStaticHandlers() {
   }
   $("open-add-friend")?.addEventListener("click", () => showView("add-friend"));
   $("welcome-add-friend")?.addEventListener("click", () => showView("add-friend"));
+  // Welcome quick-start: open Add-friend on the "Share me" tab and
+  // auto-trigger the generate so the link is ready immediately.
+  $("welcome-share")?.addEventListener("click", () => {
+    state.addFriendTab = "share";
+    showView("add-friend");
+    setTimeout(() => $("contact-qr-generate")?.click(), 0);
+  });
+  // Welcome quick-start: jump straight to global settings, where the
+  // side rail's "+ add side" + the existing side list both live.
+  $("welcome-switch")?.addEventListener("click", () => showView("settings"));
 
   // Thread compose.
   $("compose-send")?.addEventListener("click", () => safe(sendCurrentThread));
@@ -942,7 +1224,11 @@ function attachStaticHandlers() {
     safe(async () => {
       const peer = state.view.params?.peer;
       if (!peer || !state.activeSide) return;
-      if (!confirm(`Remove ${friendDisplayFor(peer)} as a friend?`)) return;
+      const ok = await window.svConfirm(
+        `Remove ${friendDisplayFor(peer)} as a friend?`,
+        { title: "Remove friend", okLabel: "Remove", danger: true },
+      );
+      if (!ok) return;
       await call("remove_relationship_cmd", {
         sideAddress: state.activeSide,
         peerAddress: peer,
@@ -970,7 +1256,26 @@ function attachStaticHandlers() {
       $("contact-qr-svg").innerHTML = resp.svg;
       $("contact-qr-uri").value = resp.uri;
       $("contact-qr-block").hidden = false;
+      // Reveal the "Copy link" affordance now that we have a URI.
+      const copyBtn = $("contact-qr-copy");
+      if (copyBtn) copyBtn.hidden = false;
       showOk(t("toast.qr_shown"));
+    }),
+  );
+  $("contact-qr-copy")?.addEventListener("click", () =>
+    safe(async () => {
+      const uri = $("contact-qr-uri")?.value || "";
+      if (!uri) throw new Error("no link to copy");
+      try {
+        await navigator.clipboard.writeText(uri);
+        showOk(t("toast.invite_copied"));
+      } catch {
+        // Fallback for environments without clipboard permission.
+        const ta = $("contact-qr-uri");
+        ta?.select?.();
+        document.execCommand("copy");
+        showOk(t("toast.invite_copied"));
+      }
     }),
   );
   $("contact-paste-accept")?.addEventListener("click", () =>
@@ -1001,7 +1306,19 @@ function attachStaticHandlers() {
   $("profile-save")?.addEventListener("click", () =>
     safe(async () => {
       if (!state.activeSide) throw new Error(t("toast.no_side"));
-      const name = $("profile-name").value.trim() || null;
+      const rawName = $("profile-name").value.trim();
+      // Username validation: identifier-shaped, ≤32 chars. Allow
+      // [A-Za-z0-9._-]. Empty is allowed (= unset). Not enforced
+      // for uniqueness; Phase 2 registry will handle that.
+      if (rawName) {
+        if (rawName.length > 32) {
+          throw new Error(t("err.username_too_long"));
+        }
+        if (!/^[A-Za-z0-9._-]+$/.test(rawName)) {
+          throw new Error(t("err.username_bad_chars"));
+        }
+      }
+      const name = rawName || null;
       const bio = $("profile-bio").value.trim() || null;
       const capsRaw = $("profile-caps").value.trim();
       const capabilities = capsRaw
@@ -1016,15 +1333,42 @@ function attachStaticHandlers() {
       showOk(t("toast.profile_saved"));
     }),
   );
+
+  // Photo picker — file input is hidden; the Change button triggers it.
+  $("side-photo-change")?.addEventListener("click", () => {
+    $("side-photo-file")?.click();
+  });
+  $("side-photo-file")?.addEventListener("change", (e) =>
+    safe(async () => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      await uploadSidePhoto(file);
+      e.target.value = ""; // allow re-picking the same file
+      showOk(t("toast.photo_saved"));
+    }),
+  );
+  $("side-photo-clear")?.addEventListener("click", () =>
+    safe(async () => {
+      if (!state.activeSide) return;
+      await call("clear_side_avatar", {
+        dataDir: state.dataDir,
+        sideAddress: state.activeSide,
+      });
+      state.sidePhotoUrls.delete(state.activeSide);
+      renderRail();
+      renderInside();
+      renderSideSettings();
+      showOk(t("toast.photo_cleared"));
+    }),
+  );
   $("side-retire")?.addEventListener("click", () =>
     safe(async () => {
       if (!state.activeSide) throw new Error(t("toast.no_side"));
-      if (
-        !confirm(
-          `Retire ${shortenAddr(state.activeSide)}? Peers will treat new traffic from this side as anomalous. Can't be undone.`,
-        )
-      )
-        return;
+      const ok = await window.svConfirm(
+        `Retire ${shortenAddr(state.activeSide)}? Peers will treat new traffic from this side as anomalous. Can't be undone.`,
+        { title: "Retire side", okLabel: "Retire", cancelLabel: "Cancel", danger: true },
+      );
+      if (!ok) return;
       await call("retire_side_cmd", {
         sideAddress: state.activeSide,
         reason: "user-retired",
