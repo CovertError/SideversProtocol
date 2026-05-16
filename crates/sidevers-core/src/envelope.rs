@@ -163,15 +163,18 @@ pub struct Envelope {
 
 impl core::fmt::Debug for Envelope {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // Identifier fields are truncated to a `LogId` prefix so that
+        // `tracing::debug!(envelope = ?env, ...)` cannot leak full peer
+        // pubkeys or replay-cache keys into log output.
         f.debug_struct("Envelope")
             .field("v", &self.version)
             .field("t", &format_args!("0x{:02X}", self.message_type.0))
-            .field("from", &hex::encode(self.from))
-            .field("to", &self.to.map(hex::encode))
+            .field("from", &crate::LogId::new(&self.from))
+            .field("to", &self.to.as_ref().map(|b| crate::LogId::new(b)))
             .field("ts", &self.timestamp)
-            .field("nonce", &hex::encode(self.nonce))
+            .field("nonce", &crate::LogId::new(&self.nonce))
             .field("payload_len", &self.payload.len())
-            .field("sig", &format_args!("{}…", &hex::encode(&self.sig[..8])))
+            .field("sig", &crate::LogId::new(&self.sig[..]))
             .finish()
     }
 }
