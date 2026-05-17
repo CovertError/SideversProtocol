@@ -2649,6 +2649,30 @@ async fn apply_pending_update(app: tauri::AppHandle) -> Result<(), String> {
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .setup(|app| {
+            // Background update check on launch. Fires once 5s after the
+            // window appears, emits `updater:available` with the version +
+            // notes if a newer signed build is on GitHub. Frontend listens
+            // and surfaces it as a non-blocking toast with "Install now"
+            // and "Later" actions.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                use tauri_plugin_updater::UpdaterExt;
+                let Ok(updater) = handle.updater() else {
+                    return;
+                };
+                if let Ok(Some(update)) = updater.check().await {
+                    let payload = serde_json::json!({
+                        "version": update.version,
+                        "notes": update.body,
+                        "date": update.date.map(|d| d.to_string()),
+                    });
+                    let _ = handle.emit("updater:available", payload);
+                }
+            });
+            Ok(())
+        })
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             // Live-node commands (Phase 1.5h: client networking)

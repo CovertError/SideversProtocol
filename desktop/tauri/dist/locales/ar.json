@@ -214,6 +214,7 @@
   "settings.updates_uptodate": "أنت على أحدث إصدار.",
   "settings.updates_error": "فشل التحقق من التحديث: {message}",
   "settings.updates_installing": "جارٍ التنزيل… سيُعاد تشغيل التطبيق عند الانتهاء.",
+  "toast.update_available": "النسخة {version} من سايدفرز متاحة — اضغط للتثبيت.",
   "btn.check_updates": "تحقق من التحديثات",
   "btn.install_update": "نزّل وثبّت",
   "settings.about_h": "عن البرنامج",

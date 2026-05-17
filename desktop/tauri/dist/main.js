@@ -671,8 +671,39 @@ window.svBoot = async function svBoot(nodeInfo, dataDir) {
   if (listen) {
     listen("inbox:dm", (e) => onInboxDm(e?.payload));
     listen("verse:post", (e) => onVersePost(e?.payload));
+    listen("updater:available", (e) => onUpdateAvailable(e?.payload));
   }
 };
+
+// Background-check toast triggered by the Rust setup() hook 5s after
+// launch. Shows once per session; clicking the toast jumps to Settings
+// → Updates so the user can read the notes and install.
+let __updaterToastShown = false;
+function onUpdateAvailable(payload) {
+  if (__updaterToastShown) return;
+  __updaterToastShown = true;
+  const el = $("error");
+  if (!el || !payload?.version) return;
+  el.classList.add("ok");
+  el.textContent =
+    t("toast.update_available", { version: payload.version }) ||
+    `Sidevers ${payload.version} is available — click to install.`;
+  el.style.cursor = "pointer";
+  const handler = () => {
+    el.removeEventListener("click", handler);
+    el.style.cursor = "";
+    clearToast();
+    showView("settings");
+    // Scroll the Updates row into view if the settings view is now visible.
+    setTimeout(() => {
+      $("settings-update-check")?.scrollIntoView({
+        behavior: "smooth",
+        block: "center",
+      });
+    }, 100);
+  };
+  el.addEventListener("click", handler);
+}
 
 async function refreshGroups() {
   if (!state.dataDir) {

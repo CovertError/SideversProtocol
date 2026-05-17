@@ -214,6 +214,7 @@
   "settings.updates_uptodate": "You're on the latest version.",
   "settings.updates_error": "Update check failed: {message}",
   "settings.updates_installing": "Downloading… the app will restart when finished.",
+  "toast.update_available": "Sidevers {version} is available — click to install.",
   "btn.check_updates": "Check for updates",
   "btn.install_update": "Download and install",
   "settings.about_h": "About",
