@@ -23,3 +23,12 @@ anyhow = { workspace = true }
 hex = { workspace = true }
 tokio = { workspace = true }
 tempfile = { workspace = true }
+# Self-update via GitHub Releases. Pulled in only for the `sidevers
+# self-update` subcommand; default features cover gzip + zip extraction
+# and rustls (no openssl in the build).
+self_update = { version = "0.41", default-features = false, features = [
+    "archive-tar",
+    "archive-zip",
+    "compression-flate2",
+    "rustls",
+] }

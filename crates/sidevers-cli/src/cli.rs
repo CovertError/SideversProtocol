@@ -56,6 +56,21 @@ enum Command {
     /// Phase 3.I: multi-side management against a persistent data dir.
     #[command(subcommand)]
     Side(SideCmd),
+    /// Replace this binary with the latest signed release from GitHub.
+    SelfUpdate(SelfUpdateArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct SelfUpdateArgs {
+    /// Report the latest available version but don't install.
+    #[arg(long)]
+    check: bool,
+    /// Pin to a specific release tag (e.g. `v0.1.2`) instead of `latest`.
+    #[arg(long)]
+    version: Option<String>,
+    /// Apply without the interactive y/N prompt.
+    #[arg(long)]
+    yes: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -284,7 +299,78 @@ pub async fn run() -> Result<()> {
             side,
             reason,
         }) => side_retire(&data_dir, &side, reason).await,
+        Command::SelfUpdate(args) => self_update_run(args),
     }
+}
+
+// ---------------------------------------------------------------------
+// Self-update: fetch the latest signed CLI release from GitHub and swap
+// this binary in place. The releases pipeline (.github/workflows/release.yml)
+// emits one tarball per platform — e.g. `sidevers-cli-linux-x64.tar.gz`
+// with the binary at `linux-x64/bin/sidevers`. We match by `target` and
+// override `bin_path_in_archive` accordingly.
+// ---------------------------------------------------------------------
+
+const SELF_UPDATE_REPO_OWNER: &str = "CovertError";
+const SELF_UPDATE_REPO_NAME: &str = "SideversProtocol";
+
+/// Compile-time platform label that matches the artefact naming in
+/// `.github/workflows/release.yml` (cli matrix). Returns `None` on
+/// targets we don't ship binaries for.
+fn self_update_target_label() -> Option<&'static str> {
+    if cfg!(target_os = "macos") {
+        Some("macos-universal")
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        Some("linux-x64")
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        Some("linux-arm64")
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        Some("windows-x64")
+    } else {
+        None
+    }
+}
+
+fn self_update_run(args: SelfUpdateArgs) -> Result<()> {
+    let target = self_update_target_label().ok_or_else(|| {
+        anyhow!("self-update has no prebuilt artefact for this target; build from source")
+    })?;
+    let bin_path = format!("{target}/bin/sidevers");
+
+    let mut builder = self_update::backends::github::Update::configure();
+    builder
+        .repo_owner(SELF_UPDATE_REPO_OWNER)
+        .repo_name(SELF_UPDATE_REPO_NAME)
+        .bin_name("sidevers")
+        .bin_path_in_archive(&bin_path)
+        .target(target)
+        .current_version(env!("CARGO_PKG_VERSION"))
+        .show_download_progress(true)
+        .no_confirm(args.yes);
+    if let Some(v) = &args.version {
+        builder.target_version_tag(v);
+    }
+    let update = builder.build()?;
+
+    let latest = update.get_latest_release()?;
+    let current = env!("CARGO_PKG_VERSION");
+    if args.check {
+        if latest.version == current {
+            println!("up-to-date · running v{current}");
+        } else {
+            println!("update available · v{current} → v{}", latest.version);
+        }
+        return Ok(());
+    }
+
+    if latest.version == current && args.version.is_none() {
+        println!("already on v{current}; nothing to do");
+        return Ok(());
+    }
+
+    let status = update.update().context("self-update failed")?;
+    println!("updated to v{}", status.version());
+    Ok(())
 }
 
 // ============================================================================
