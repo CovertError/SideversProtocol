@@ -301,6 +301,72 @@ void sv_free_buffer(uint8_t *ptr, uintptr_t len);
  */
 void sv_free_string(char *ptr);
 
+/**
+ * Verify a `HandleAttestPayload` wire encoding and extract the side public
+ * key, the claimed handle, and the issued-at timestamp.
+ *
+ * Inputs:
+ *   * `wire_ptr`, `wire_len` — the CBOR-encoded HandleAttest bytes.
+ *
+ * Outputs (all required):
+ *   * `out_side_pk_32` — writable 32-byte buffer for the claiming side's pubkey.
+ *   * `*out_handle` — heap-allocated NUL-terminated C string with the handle.
+ *     Free with [`sv_free_string`](crate::sv_free_string).
+ *   * `out_issued_at` — writable u64.
+ *
+ * On error, no outputs are modified.
+ */
+SvStatus sv_handle_attest_verify(const uint8_t *wire_ptr,
+                                 uintptr_t wire_len,
+                                 uint8_t *out_side_pk_32,
+                                 char **out_handle,
+                                 uint64_t *out_issued_at);
+
+/**
+ * Verify a `PagePublishPayload` wire encoding and extract the side public
+ * key, slug, MIME type, content bytes, and published-at timestamp.
+ *
+ * Inputs:
+ *   * `wire_ptr`, `wire_len` — the CBOR-encoded PagePublish bytes.
+ *
+ * Outputs (all required):
+ *   * `out_side_pk_32` — writable 32-byte buffer for the publishing side.
+ *   * `*out_slug` — heap-allocated NUL-terminated C string with the slug.
+ *     Free with [`sv_free_string`](crate::sv_free_string).
+ *   * `*out_mime` — heap-allocated NUL-terminated C string with the MIME.
+ *     Free with [`sv_free_string`](crate::sv_free_string).
+ *   * `*out_content_ptr` / `*out_content_len` — heap-allocated content
+ *     bytes. Free with [`sv_free_buffer`](crate::sv_free_buffer).
+ *   * `out_published_at` — writable u64.
+ *
+ * On error, no outputs are modified and any partially allocated buffers
+ * are freed before returning.
+ */
+SvStatus sv_page_publish_verify(const uint8_t *wire_ptr,
+                                uintptr_t wire_len,
+                                uint8_t *out_side_pk_32,
+                                char **out_slug,
+                                char **out_mime,
+                                uint8_t **out_content_ptr,
+                                uintptr_t *out_content_len,
+                                uint64_t *out_published_at);
+
+/**
+ * Verify a 64-byte Ed25519 signature against a 32-byte public key and an
+ * arbitrary message. Returns `SvStatus::Ok` if the signature verifies,
+ * `SvStatus::Crypto` if it doesn't, `SvStatus::Decode` if the public key
+ * is not a valid Ed25519 point.
+ *
+ * This is the thin wrapper used by the Laravel paired-device sign-in flow
+ * to verify a side's signature over an auth challenge. The challenge
+ * message itself is constructed PHP-side; this function only checks the
+ * math.
+ */
+SvStatus sv_verify_signature(const uint8_t *pubkey_32,
+                             const uint8_t *msg_ptr,
+                             uintptr_t msg_len,
+                             const uint8_t *sig_64);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif  // __cplusplus

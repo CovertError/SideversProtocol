@@ -32,6 +32,7 @@ mod error;
 mod keys;
 mod linkage;
 mod mem;
+mod public;
 
 pub use address::*;
 pub use contact::*;
@@ -40,3 +41,4 @@ pub use error::*;
 pub use keys::*;
 pub use linkage::*;
 pub use mem::*;
+pub use public::*;

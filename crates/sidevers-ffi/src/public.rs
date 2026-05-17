@@ -1,0 +1,384 @@
+//! Public-layer FFI: verify-side codecs and a generic Ed25519 verifier.
+//!
+//! The Rust node ships the public-layer wire codecs (`HandleAttest`,
+//! `PagePublish`, etc.) but no `serve_public` handler — Phase 2 of the
+//! protocol roadmap is the Laravel-side `sidevers.com` registry. This
+//! module is the FFI surface that lets that registry verify wire payloads
+//! against `libsidevers` instead of reimplementing CBOR + Ed25519 +
+//! BLAKE3 in PHP.
+//!
+//! Only the *verify* (and one composite *encode*) operations live here:
+//! the registry never holds user seeds, so the *sign* side stays in the
+//! desktop / mobile clients that own the keys.
+
+use std::os::raw::c_char;
+
+use sidevers_core::keys::{PUBLIC_KEY_LEN, PublicKey, SIGNATURE_LEN};
+use sidevers_core::{HandleAttestPayload, PagePublishPayload};
+
+use crate::error::{SvStatus, clear_last_error, ffi_entry, set_last_error, status_from};
+use crate::mem::string_to_ffi;
+use crate::mem::vec_to_ffi;
+
+/// Verify a `HandleAttestPayload` wire encoding and extract the side public
+/// key, the claimed handle, and the issued-at timestamp.
+///
+/// Inputs:
+///   * `wire_ptr`, `wire_len` — the CBOR-encoded HandleAttest bytes.
+///
+/// Outputs (all required):
+///   * `out_side_pk_32` — writable 32-byte buffer for the claiming side's pubkey.
+///   * `*out_handle` — heap-allocated NUL-terminated C string with the handle.
+///     Free with [`sv_free_string`](crate::sv_free_string).
+///   * `out_issued_at` — writable u64.
+///
+/// On error, no outputs are modified.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_handle_attest_verify(
+    wire_ptr: *const u8,
+    wire_len: usize,
+    out_side_pk_32: *mut u8,
+    out_handle: *mut *mut c_char,
+    out_issued_at: *mut u64,
+) -> SvStatus {
+    ffi_entry("sv_handle_attest_verify", || {
+        if wire_ptr.is_null()
+            || out_side_pk_32.is_null()
+            || out_handle.is_null()
+            || out_issued_at.is_null()
+        {
+            set_last_error("sv_handle_attest_verify: null pointer argument");
+            return SvStatus::NullPtr;
+        }
+        // SAFETY: caller contract — wire_ptr is readable for wire_len bytes.
+        let wire = unsafe { std::slice::from_raw_parts(wire_ptr, wire_len) };
+        let (status, payload) = status_from(HandleAttestPayload::from_wire_bytes(wire));
+        let payload = match payload {
+            Some(p) => p,
+            None => return status,
+        };
+
+        // Allocate the handle string up-front so the function is atomic on
+        // success/failure (mirrors the contact.rs precedent).
+        let handle_ptr = string_to_ffi(payload.handle);
+        if handle_ptr.is_null() {
+            set_last_error("sv_handle_attest_verify: handle contained interior NUL");
+            return SvStatus::Decode;
+        }
+
+        // SAFETY: caller contract — all output pointers are writable; side
+        // pubkey is 32 bytes; string pointer is valid until freed.
+        unsafe {
+            std::ptr::copy_nonoverlapping(payload.side.as_ptr(), out_side_pk_32, PUBLIC_KEY_LEN);
+            std::ptr::write(out_handle, handle_ptr);
+            std::ptr::write(out_issued_at, payload.issued_at);
+        }
+        SvStatus::Ok
+    })
+}
+
+/// Verify a `PagePublishPayload` wire encoding and extract the side public
+/// key, slug, MIME type, content bytes, and published-at timestamp.
+///
+/// Inputs:
+///   * `wire_ptr`, `wire_len` — the CBOR-encoded PagePublish bytes.
+///
+/// Outputs (all required):
+///   * `out_side_pk_32` — writable 32-byte buffer for the publishing side.
+///   * `*out_slug` — heap-allocated NUL-terminated C string with the slug.
+///     Free with [`sv_free_string`](crate::sv_free_string).
+///   * `*out_mime` — heap-allocated NUL-terminated C string with the MIME.
+///     Free with [`sv_free_string`](crate::sv_free_string).
+///   * `*out_content_ptr` / `*out_content_len` — heap-allocated content
+///     bytes. Free with [`sv_free_buffer`](crate::sv_free_buffer).
+///   * `out_published_at` — writable u64.
+///
+/// On error, no outputs are modified and any partially allocated buffers
+/// are freed before returning.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_page_publish_verify(
+    wire_ptr: *const u8,
+    wire_len: usize,
+    out_side_pk_32: *mut u8,
+    out_slug: *mut *mut c_char,
+    out_mime: *mut *mut c_char,
+    out_content_ptr: *mut *mut u8,
+    out_content_len: *mut usize,
+    out_published_at: *mut u64,
+) -> SvStatus {
+    ffi_entry("sv_page_publish_verify", || {
+        if wire_ptr.is_null()
+            || out_side_pk_32.is_null()
+            || out_slug.is_null()
+            || out_mime.is_null()
+            || out_content_ptr.is_null()
+            || out_content_len.is_null()
+            || out_published_at.is_null()
+        {
+            set_last_error("sv_page_publish_verify: null pointer argument");
+            return SvStatus::NullPtr;
+        }
+        // SAFETY: caller contract — wire_ptr is readable for wire_len bytes.
+        let wire = unsafe { std::slice::from_raw_parts(wire_ptr, wire_len) };
+        let (status, payload) = status_from(PagePublishPayload::from_wire_bytes(wire));
+        let payload = match payload {
+            Some(p) => p,
+            None => return status,
+        };
+
+        // Allocate all three output buffers up-front. If any fails, free
+        // the ones that succeeded so the caller sees an atomic failure.
+        let slug_ptr = string_to_ffi(payload.slug);
+        if slug_ptr.is_null() {
+            set_last_error("sv_page_publish_verify: slug contained interior NUL");
+            return SvStatus::Decode;
+        }
+        let mime_ptr = string_to_ffi(payload.mime);
+        if mime_ptr.is_null() {
+            // SAFETY: slug_ptr came from CString::into_raw via string_to_ffi.
+            unsafe {
+                drop(std::ffi::CString::from_raw(slug_ptr));
+            }
+            set_last_error("sv_page_publish_verify: mime contained interior NUL");
+            return SvStatus::Decode;
+        }
+        let (content_ptr, content_len) = vec_to_ffi(payload.content);
+
+        // SAFETY: caller contract — all output pointers are writable; side
+        // pubkey is 32 bytes; buffer pointers are valid until freed.
+        unsafe {
+            std::ptr::copy_nonoverlapping(payload.side.as_ptr(), out_side_pk_32, PUBLIC_KEY_LEN);
+            std::ptr::write(out_slug, slug_ptr);
+            std::ptr::write(out_mime, mime_ptr);
+            std::ptr::write(out_content_ptr, content_ptr);
+            std::ptr::write(out_content_len, content_len);
+            std::ptr::write(out_published_at, payload.published_at);
+        }
+        clear_last_error();
+        SvStatus::Ok
+    })
+}
+
+/// Verify a 64-byte Ed25519 signature against a 32-byte public key and an
+/// arbitrary message. Returns `SvStatus::Ok` if the signature verifies,
+/// `SvStatus::Crypto` if it doesn't, `SvStatus::Decode` if the public key
+/// is not a valid Ed25519 point.
+///
+/// This is the thin wrapper used by the Laravel paired-device sign-in flow
+/// to verify a side's signature over an auth challenge. The challenge
+/// message itself is constructed PHP-side; this function only checks the
+/// math.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_verify_signature(
+    pubkey_32: *const u8,
+    msg_ptr: *const u8,
+    msg_len: usize,
+    sig_64: *const u8,
+) -> SvStatus {
+    ffi_entry("sv_verify_signature", || {
+        if pubkey_32.is_null() || sig_64.is_null() {
+            set_last_error("sv_verify_signature: null pointer argument");
+            return SvStatus::NullPtr;
+        }
+        // msg_ptr may be null only if msg_len == 0 (empty message is legal).
+        if msg_ptr.is_null() && msg_len != 0 {
+            set_last_error("sv_verify_signature: null message pointer with non-zero length");
+            return SvStatus::NullPtr;
+        }
+
+        // SAFETY: caller contract — pubkey_32 is a 32-byte readable buffer.
+        let pk_slice = unsafe { std::slice::from_raw_parts(pubkey_32, PUBLIC_KEY_LEN) };
+        let mut pk_arr = [0u8; PUBLIC_KEY_LEN];
+        pk_arr.copy_from_slice(pk_slice);
+        let pk = match PublicKey::from_bytes(&pk_arr) {
+            Ok(p) => p,
+            Err(e) => {
+                set_last_error(format!("sv_verify_signature: {e}"));
+                return SvStatus::Decode;
+            }
+        };
+
+        // SAFETY: caller contract — sig_64 is a 64-byte readable buffer.
+        let sig_slice = unsafe { std::slice::from_raw_parts(sig_64, SIGNATURE_LEN) };
+        let mut sig_arr = [0u8; SIGNATURE_LEN];
+        sig_arr.copy_from_slice(sig_slice);
+
+        // msg_ptr may be null when msg_len is 0; from_raw_parts requires a
+        // non-null dangling pointer even with zero length, so synthesize one.
+        let msg = if msg_len == 0 {
+            &[][..]
+        } else {
+            // SAFETY: caller contract — msg_ptr is readable for msg_len bytes.
+            unsafe { std::slice::from_raw_parts(msg_ptr, msg_len) }
+        };
+
+        match pk.verify(msg, &sig_arr) {
+            Ok(()) => {
+                clear_last_error();
+                SvStatus::Ok
+            }
+            Err(e) => {
+                set_last_error(format!("sv_verify_signature: {e}"));
+                SvStatus::Crypto
+            }
+        }
+    })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use sidevers_core::keys::{MasterKey, SideKey};
+
+    fn fresh_side(label: &str) -> SideKey {
+        let seed = [0x42u8; 32];
+        let master = MasterKey::from_seed(&seed);
+        master.derive_side(&label.into()).unwrap()
+    }
+
+    #[test]
+    fn handle_attest_verify_round_trips() {
+        let side = fresh_side("test");
+        let payload = HandleAttestPayload::sign(&side, "omar", 1_700_000_000).unwrap();
+        let wire = payload.to_wire_bytes();
+
+        let mut out_pk = [0u8; PUBLIC_KEY_LEN];
+        let mut out_handle: *mut c_char = std::ptr::null_mut();
+        let mut out_issued_at: u64 = 0;
+        let status = unsafe {
+            sv_handle_attest_verify(
+                wire.as_ptr(),
+                wire.len(),
+                out_pk.as_mut_ptr(),
+                &mut out_handle,
+                &mut out_issued_at,
+            )
+        };
+        assert_eq!(status, SvStatus::Ok);
+        assert_eq!(out_pk, side.public_bytes());
+        assert_eq!(out_issued_at, 1_700_000_000);
+        let handle = unsafe { std::ffi::CStr::from_ptr(out_handle) }
+            .to_str()
+            .unwrap();
+        assert_eq!(handle, "omar");
+        unsafe {
+            drop(std::ffi::CString::from_raw(out_handle));
+        }
+    }
+
+    #[test]
+    fn handle_attest_verify_rejects_tampered_wire() {
+        let side = fresh_side("test");
+        let payload = HandleAttestPayload::sign(&side, "omar", 1_700_000_000).unwrap();
+        let mut wire = payload.to_wire_bytes();
+        let last = wire.len() - 1;
+        wire[last] ^= 0x01;
+
+        let mut out_pk = [0u8; PUBLIC_KEY_LEN];
+        let mut out_handle: *mut c_char = std::ptr::null_mut();
+        let mut out_issued_at: u64 = 0;
+        let status = unsafe {
+            sv_handle_attest_verify(
+                wire.as_ptr(),
+                wire.len(),
+                out_pk.as_mut_ptr(),
+                &mut out_handle,
+                &mut out_issued_at,
+            )
+        };
+        assert_ne!(status, SvStatus::Ok);
+        assert!(out_handle.is_null());
+    }
+
+    #[test]
+    fn page_publish_verify_round_trips() {
+        let side = fresh_side("test");
+        let payload = PagePublishPayload::sign(
+            &side,
+            "hello",
+            "text/markdown",
+            b"# Hello\n".to_vec(),
+            1_700_000_000,
+        )
+        .unwrap();
+        let wire = payload.to_wire_bytes();
+
+        let mut out_pk = [0u8; PUBLIC_KEY_LEN];
+        let mut out_slug: *mut c_char = std::ptr::null_mut();
+        let mut out_mime: *mut c_char = std::ptr::null_mut();
+        let mut out_content: *mut u8 = std::ptr::null_mut();
+        let mut out_content_len: usize = 0;
+        let mut out_pub_at: u64 = 0;
+        let status = unsafe {
+            sv_page_publish_verify(
+                wire.as_ptr(),
+                wire.len(),
+                out_pk.as_mut_ptr(),
+                &mut out_slug,
+                &mut out_mime,
+                &mut out_content,
+                &mut out_content_len,
+                &mut out_pub_at,
+            )
+        };
+        assert_eq!(status, SvStatus::Ok);
+        assert_eq!(out_pk, side.public_bytes());
+        assert_eq!(out_pub_at, 1_700_000_000);
+        let slug = unsafe { std::ffi::CStr::from_ptr(out_slug) }
+            .to_str()
+            .unwrap();
+        let mime = unsafe { std::ffi::CStr::from_ptr(out_mime) }
+            .to_str()
+            .unwrap();
+        let content =
+            unsafe { std::slice::from_raw_parts(out_content, out_content_len) }.to_vec();
+        assert_eq!(slug, "hello");
+        assert_eq!(mime, "text/markdown");
+        assert_eq!(content, b"# Hello\n");
+        unsafe {
+            drop(std::ffi::CString::from_raw(out_slug));
+            drop(std::ffi::CString::from_raw(out_mime));
+            let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+                out_content,
+                out_content_len,
+            ));
+        }
+    }
+
+    #[test]
+    fn verify_signature_round_trips() {
+        let side = fresh_side("test");
+        let pk = side.public_bytes();
+        let msg = b"sidevers/v1/web-auth/test-nonce";
+        let sig = side.sign(msg);
+
+        let status = unsafe {
+            sv_verify_signature(pk.as_ptr(), msg.as_ptr(), msg.len(), sig.as_ptr())
+        };
+        assert_eq!(status, SvStatus::Ok);
+    }
+
+    #[test]
+    fn verify_signature_rejects_wrong_message() {
+        let side = fresh_side("test");
+        let pk = side.public_bytes();
+        let msg = b"signed-this";
+        let other = b"not-this";
+        let sig = side.sign(msg);
+
+        let status = unsafe {
+            sv_verify_signature(pk.as_ptr(), other.as_ptr(), other.len(), sig.as_ptr())
+        };
+        assert_eq!(status, SvStatus::Crypto);
+    }
+
+    #[test]
+    fn verify_signature_accepts_empty_message() {
+        let side = fresh_side("test");
+        let pk = side.public_bytes();
+        let sig = side.sign(b"");
+        let status = unsafe { sv_verify_signature(pk.as_ptr(), std::ptr::null(), 0, sig.as_ptr()) };
+        assert_eq!(status, SvStatus::Ok);
+    }
+}

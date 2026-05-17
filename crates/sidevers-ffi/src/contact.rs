@@ -152,9 +152,7 @@ pub unsafe extern "C" fn sv_contact_card_parse(
         let uri_bytes = match unsafe { cstr_with_cap(uri) } {
             Some(b) => b,
             None => {
-                set_last_error(
-                    "sv_contact_card_parse: uri not NUL-terminated within length cap",
-                );
+                set_last_error("sv_contact_card_parse: uri not NUL-terminated within length cap");
                 return SvStatus::InvalidInput;
             }
         };
@@ -190,9 +188,7 @@ pub unsafe extern "C" fn sv_contact_card_parse(
                     unsafe {
                         drop(std::ffi::CString::from_raw(dial_ptr));
                     }
-                    set_last_error(
-                        "sv_contact_card_parse: display_name contained interior NUL",
-                    );
+                    set_last_error("sv_contact_card_parse: display_name contained interior NUL");
                     return SvStatus::Decode;
                 }
                 p
@@ -210,9 +206,7 @@ pub unsafe extern "C" fn sv_contact_card_parse(
                             drop(std::ffi::CString::from_raw(display_ptr));
                         }
                     }
-                    set_last_error(
-                        "sv_contact_card_parse: side_label contained interior NUL",
-                    );
+                    set_last_error("sv_contact_card_parse: side_label contained interior NUL");
                     return SvStatus::Decode;
                 }
                 p
@@ -489,13 +483,7 @@ mod tests {
         let mut b: *mut c_char = std::ptr::null_mut();
         let mut c: *mut c_char = std::ptr::null_mut();
         let s = unsafe {
-            sv_contact_card_parse(
-                bogus.as_ptr(),
-                side.as_mut_ptr(),
-                &mut a,
-                &mut b,
-                &mut c,
-            )
+            sv_contact_card_parse(bogus.as_ptr(), side.as_mut_ptr(), &mut a, &mut b, &mut c)
         };
         assert_ne!(s, SvStatus::Ok);
         // None of the outputs should be touched on error.
@@ -512,13 +500,7 @@ mod tests {
         let mut b: *mut c_char = std::ptr::null_mut();
         let mut c: *mut c_char = std::ptr::null_mut();
         let s = unsafe {
-            sv_contact_card_parse(
-                std::ptr::null(),
-                side.as_mut_ptr(),
-                &mut a,
-                &mut b,
-                &mut c,
-            )
+            sv_contact_card_parse(std::ptr::null(), side.as_mut_ptr(), &mut a, &mut b, &mut c)
         };
         assert_eq!(s, SvStatus::NullPtr);
     }
@@ -538,7 +520,10 @@ mod tests {
                 &mut uri_ptr,
             )
         };
-        let mut uri = unsafe { CStr::from_ptr(uri_ptr) }.to_str().unwrap().to_owned();
+        let mut uri = unsafe { CStr::from_ptr(uri_ptr) }
+            .to_str()
+            .unwrap()
+            .to_owned();
         // Replace the last base32 char with a non-base32 char ('1' is not in the alphabet).
         let last = uri.len() - 1;
         uri.replace_range(last..last + 1, "1");

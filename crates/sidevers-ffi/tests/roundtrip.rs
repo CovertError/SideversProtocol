@@ -427,9 +427,8 @@ fn contact_card_parse_rejects_non_sidevers_uri() {
     let mut a: *mut std::os::raw::c_char = std::ptr::null_mut();
     let mut b: *mut std::os::raw::c_char = std::ptr::null_mut();
     let mut c: *mut std::os::raw::c_char = std::ptr::null_mut();
-    let status = unsafe {
-        sv_contact_card_parse(bogus.as_ptr(), side.as_mut_ptr(), &mut a, &mut b, &mut c)
-    };
+    let status =
+        unsafe { sv_contact_card_parse(bogus.as_ptr(), side.as_mut_ptr(), &mut a, &mut b, &mut c) };
     assert_ne!(status, SvStatus::Ok);
     assert!(a.is_null());
     assert!(b.is_null());

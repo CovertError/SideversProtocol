@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# .githooks/pre-push — guard pushes with the CI gates (fmt, clippy, test).
+#
+# Activated by `bash scripts/preflight.sh --install-hooks`, which sets
+# core.hooksPath to .githooks. Without that, this file is dormant.
+#
+# Skip in genuine emergencies with `SKIP_PREFLIGHT=1 git push`; the audit
+# trail is the env var, not the absence of a hook.
+
+set -u
+
+if [ "${SKIP_PREFLIGHT:-0}" = "1" ]; then
+    echo "pre-push: SKIP_PREFLIGHT=1 set — bypassing local CI gates" >&2
+    exit 0
+fi
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+exec bash "$REPO_ROOT/scripts/preflight.sh"

@@ -95,7 +95,36 @@ where
     }
 }
 
+/// Convert a Rust `Result` into an `SvStatus`, setting the last-error
+/// message on failure.
+pub(crate) fn status_from<T>(r: Result<T, sidevers_core::Error>) -> (SvStatus, Option<T>) {
+    match r {
+        Ok(v) => {
+            clear_last_error();
+            (SvStatus::Ok, Some(v))
+        }
+        Err(e) => {
+            use sidevers_core::Error::*;
+            let status = match &e {
+                SignatureInvalid | DecryptionFailed => SvStatus::Crypto,
+                CborEncode(_) | CborDecode(_) | CborNotCanonical(_) => SvStatus::Decode,
+                Address(_) => SvStatus::Decode,
+                CsprngUnavailable(_) => SvStatus::CsprngUnavailable,
+                BadFieldLength { .. }
+                | TimestampSkewed { .. }
+                | Replay
+                | UnsupportedVersion { .. }
+                | UnknownType(_) => SvStatus::InvalidInput,
+                Invariant(_) => SvStatus::Internal,
+            };
+            set_last_error(e.to_string());
+            (status, None)
+        }
+    }
+}
+
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -127,33 +156,5 @@ mod tests {
             assert!(s.contains("named_test_fn"));
             assert!(s.contains("panicked"));
         });
-    }
-}
-
-/// Convert a Rust `Result` into an `SvStatus`, setting the last-error
-/// message on failure.
-pub(crate) fn status_from<T>(r: Result<T, sidevers_core::Error>) -> (SvStatus, Option<T>) {
-    match r {
-        Ok(v) => {
-            clear_last_error();
-            (SvStatus::Ok, Some(v))
-        }
-        Err(e) => {
-            use sidevers_core::Error::*;
-            let status = match &e {
-                SignatureInvalid | DecryptionFailed => SvStatus::Crypto,
-                CborEncode(_) | CborDecode(_) | CborNotCanonical(_) => SvStatus::Decode,
-                Address(_) => SvStatus::Decode,
-                CsprngUnavailable(_) => SvStatus::CsprngUnavailable,
-                BadFieldLength { .. }
-                | TimestampSkewed { .. }
-                | Replay
-                | UnsupportedVersion { .. }
-                | UnknownType(_) => SvStatus::InvalidInput,
-                Invariant(_) => SvStatus::Internal,
-            };
-            set_last_error(e.to_string());
-            (status, None)
-        }
     }
 }
