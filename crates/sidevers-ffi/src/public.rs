@@ -469,8 +469,7 @@ mod tests {
         let mime = unsafe { std::ffi::CStr::from_ptr(out_mime) }
             .to_str()
             .unwrap();
-        let content =
-            unsafe { std::slice::from_raw_parts(out_content, out_content_len) }.to_vec();
+        let content = unsafe { std::slice::from_raw_parts(out_content, out_content_len) }.to_vec();
         assert_eq!(slug, "hello");
         assert_eq!(mime, "text/markdown");
         assert_eq!(content, b"# Hello\n");
@@ -491,9 +490,8 @@ mod tests {
         let msg = b"sidevers/v1/web-auth/test-nonce";
         let sig = side.sign(msg);
 
-        let status = unsafe {
-            sv_verify_signature(pk.as_ptr(), msg.as_ptr(), msg.len(), sig.as_ptr())
-        };
+        let status =
+            unsafe { sv_verify_signature(pk.as_ptr(), msg.as_ptr(), msg.len(), sig.as_ptr()) };
         assert_eq!(status, SvStatus::Ok);
     }
 
@@ -505,9 +503,8 @@ mod tests {
         let other = b"not-this";
         let sig = side.sign(msg);
 
-        let status = unsafe {
-            sv_verify_signature(pk.as_ptr(), other.as_ptr(), other.len(), sig.as_ptr())
-        };
+        let status =
+            unsafe { sv_verify_signature(pk.as_ptr(), other.as_ptr(), other.len(), sig.as_ptr()) };
         assert_eq!(status, SvStatus::Crypto);
     }
 
@@ -522,8 +519,8 @@ mod tests {
 
     #[test]
     fn directory_entry_encode_round_trips_via_core_decoder() {
-        use std::ffi::CString;
         use sidevers_core::DirectoryEntryPayload;
+        use std::ffi::CString;
 
         let side = fresh_side("test");
         let attest = HandleAttestPayload::sign(&side, "omar", 1_700_000_000).unwrap();

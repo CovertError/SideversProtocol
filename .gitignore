@@ -26,3 +26,7 @@ target/
 # --- libfuzzer corpora and crash artifacts ---
 /fuzz/corpus
 /fuzz/artifacts
+
+# --- Cross-platform release artefacts and container build caches ---
+/dist
+/docker-cargo-cache
