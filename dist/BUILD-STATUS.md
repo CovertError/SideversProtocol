@@ -22,13 +22,16 @@ All archive checksums are in [`SHA256SUMS`](SHA256SUMS).
 | macOS universal    | `lib/libsidevers.{dylib,a}` + `sidevers.h`  | OK     |
 | Linux x86_64       | `bin/sidevers`, `bin/sidevers-node`         | OK     |
 | Linux x86_64       | `lib/libsidevers.{so,a}` + `sidevers.h`     | OK     |
+| Linux x86_64       | `gui/Sidevers_0.1.0_amd64.deb` (Debian/Ubuntu/Mint) | OK |
+| Linux x86_64       | `gui/Sidevers-0.1.0-1.x86_64.rpm` (Fedora/RHEL/openSUSE) | OK |
+| Linux x86_64       | `gui/sidevers-desktop` (raw GUI binary)     | OK     |
 | Linux aarch64      | `bin/sidevers`, `bin/sidevers-node`         | OK     |
 | Linux aarch64      | `lib/libsidevers.{so,a}` + `sidevers.h`     | OK     |
 | Windows x86_64     | `bin/sidevers.exe`, `bin/sidevers-node.exe` | OK     |
 | Windows x86_64     | `lib/sidevers.dll`, `lib/libsidevers.a`     | OK     |
 | Windows arm64      | —                                           | TODO   |
-| Linux desktop GUI  | —                                           | TODO (Tauri needs WebKit2GTK on the host) |
-| Windows desktop GUI| —                                           | TODO (Tauri needs WebView2 on the host)   |
+| Linux AppImage     | —                                           | TODO (needs privileged Docker for FUSE, or CI) |
+| Windows desktop GUI| —                                           | TODO (use `.github/workflows/release.yml` on GitHub Actions) |
 | iOS                | —                                           | Out of scope for this drop                |
 | Android            | —                                           | Out of scope for this drop                |
 
@@ -63,7 +66,17 @@ cargo zigbuild --release -p sidevers-cli -p sidevers-node -p sidevers-ffi \
     --target x86_64-unknown-linux-gnu \
     --target aarch64-unknown-linux-gnu \
     --target x86_64-pc-windows-gnu
+
+# Linux desktop GUI (.deb + .rpm) — needs Docker Desktop running
+scripts/build-linux-gui.sh
 ```
+
+## Deferred — Windows desktop GUI
+
+Tauri's Windows bundler needs MSVC + the WebView2 SDK; cross-compiling
+that stack from macOS is unreliable. The clean path is the matrix CI
+build in `.github/workflows/release.yml` — trigger it from the GitHub
+Actions tab and grab the `sidevers-windows-x64` artefact.
 
 ## Deferred — Linux / Windows desktop GUI
 
