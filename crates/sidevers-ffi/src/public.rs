@@ -14,9 +14,10 @@
 use std::os::raw::c_char;
 
 use sidevers_core::keys::{PUBLIC_KEY_LEN, PublicKey, SIGNATURE_LEN};
-use sidevers_core::{HandleAttestPayload, PagePublishPayload};
+use sidevers_core::{DirectoryEntryPayload, HandleAttestPayload, PagePublishPayload};
 
 use crate::error::{SvStatus, clear_last_error, ffi_entry, set_last_error, status_from};
+use crate::mem::cstr_with_cap;
 use crate::mem::string_to_ffi;
 use crate::mem::vec_to_ffi;
 
@@ -225,6 +226,143 @@ pub unsafe extern "C" fn sv_verify_signature(
     })
 }
 
+/// Compute a 32-byte BLAKE3 hash of an arbitrary message. Used by the
+/// Laravel registry as a content-address for HTTP ETag caching — the
+/// same hash function the protocol uses for canonical signing, so a
+/// page's BLAKE3 is stable across re-encodings.
+///
+/// Inputs:
+///   * `msg_ptr` / `msg_len` — the bytes to hash.
+///
+/// Output:
+///   * `out_hash_32` — writable 32-byte buffer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_blake3(
+    msg_ptr: *const u8,
+    msg_len: usize,
+    out_hash_32: *mut u8,
+) -> SvStatus {
+    ffi_entry("sv_blake3", || {
+        if out_hash_32.is_null() {
+            set_last_error("sv_blake3: null output buffer");
+            return SvStatus::NullPtr;
+        }
+        if msg_ptr.is_null() && msg_len != 0 {
+            set_last_error("sv_blake3: null message pointer with non-zero length");
+            return SvStatus::NullPtr;
+        }
+        let msg = if msg_len == 0 {
+            &[][..]
+        } else {
+            // SAFETY: caller contract — msg_ptr is readable for msg_len bytes.
+            unsafe { std::slice::from_raw_parts(msg_ptr, msg_len) }
+        };
+        let digest = blake3::hash(msg);
+        // SAFETY: caller contract — out_hash_32 is writable for 32 bytes.
+        unsafe {
+            std::ptr::copy_nonoverlapping(digest.as_bytes().as_ptr(), out_hash_32, 32);
+        }
+        clear_last_error();
+        SvStatus::Ok
+    })
+}
+
+/// Compose a `DirectoryEntryPayload` for a single handle from its parts.
+///
+/// The registry stores claimed handles with their already-signed
+/// `HandleAttest` wire bytes; this function takes that wire (plus the
+/// side pubkey and handle for redundant validation) and produces the
+/// canonical CBOR encoding the registry serves at
+/// `/.well-known/sidevers/resolve/{handle}`.
+///
+/// Inputs:
+///   * `side_pk_32` — the 32-byte side public key that owns the handle.
+///   * `handle` — NUL-terminated UTF-8 handle string.
+///   * `attestation_wire_ptr` / `attestation_wire_len` — the signed
+///     `HandleAttestPayload` bytes (will be verified before composition).
+///
+/// Outputs:
+///   * `*out_wire_ptr` / `*out_wire_len` — heap-allocated CBOR bytes;
+///     free with [`sv_free_buffer`](crate::sv_free_buffer).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_directory_entry_encode(
+    side_pk_32: *const u8,
+    handle: *const c_char,
+    attestation_wire_ptr: *const u8,
+    attestation_wire_len: usize,
+    out_wire_ptr: *mut *mut u8,
+    out_wire_len: *mut usize,
+) -> SvStatus {
+    ffi_entry("sv_directory_entry_encode", || {
+        if side_pk_32.is_null()
+            || handle.is_null()
+            || attestation_wire_ptr.is_null()
+            || out_wire_ptr.is_null()
+            || out_wire_len.is_null()
+        {
+            set_last_error("sv_directory_entry_encode: null pointer argument");
+            return SvStatus::NullPtr;
+        }
+        // SAFETY: caller contract — side_pk_32 is a 32-byte readable buffer.
+        let pk_slice = unsafe { std::slice::from_raw_parts(side_pk_32, PUBLIC_KEY_LEN) };
+        let mut side = [0u8; PUBLIC_KEY_LEN];
+        side.copy_from_slice(pk_slice);
+
+        // SAFETY: caller contract — handle is a NUL-terminated UTF-8 C string.
+        let handle_bytes = match unsafe { cstr_with_cap(handle) } {
+            Some(b) => b,
+            None => {
+                set_last_error(
+                    "sv_directory_entry_encode: handle not NUL-terminated within length cap",
+                );
+                return SvStatus::InvalidInput;
+            }
+        };
+        let handle_str = match std::str::from_utf8(handle_bytes) {
+            Ok(s) => s.to_owned(),
+            Err(_) => {
+                set_last_error("sv_directory_entry_encode: handle is not valid UTF-8");
+                return SvStatus::InvalidInput;
+            }
+        };
+
+        // SAFETY: caller contract — attestation_wire_ptr is readable for
+        // attestation_wire_len bytes.
+        let attest_wire =
+            unsafe { std::slice::from_raw_parts(attestation_wire_ptr, attestation_wire_len) };
+        let (status, attest) = status_from(HandleAttestPayload::from_wire_bytes(attest_wire));
+        let attest = match attest {
+            Some(a) => a,
+            None => return status,
+        };
+
+        // Sanity-check the parts match what the caller claimed — defends
+        // against the caller accidentally pairing a handle with the wrong
+        // attestation row.
+        if attest.side != side || attest.handle != handle_str {
+            set_last_error(
+                "sv_directory_entry_encode: attestation does not match (side, handle) args",
+            );
+            return SvStatus::InvalidInput;
+        }
+
+        let payload = DirectoryEntryPayload {
+            side,
+            handle: handle_str,
+            attestations: vec![attest],
+        };
+        let bytes = payload.encode();
+        let (ptr, len) = vec_to_ffi(bytes);
+        // SAFETY: caller contract — both out pointers are writable.
+        unsafe {
+            std::ptr::write(out_wire_ptr, ptr);
+            std::ptr::write(out_wire_len, len);
+        }
+        clear_last_error();
+        SvStatus::Ok
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -380,5 +518,91 @@ mod tests {
         let sig = side.sign(b"");
         let status = unsafe { sv_verify_signature(pk.as_ptr(), std::ptr::null(), 0, sig.as_ptr()) };
         assert_eq!(status, SvStatus::Ok);
+    }
+
+    #[test]
+    fn directory_entry_encode_round_trips_via_core_decoder() {
+        use std::ffi::CString;
+        use sidevers_core::DirectoryEntryPayload;
+
+        let side = fresh_side("test");
+        let attest = HandleAttestPayload::sign(&side, "omar", 1_700_000_000).unwrap();
+        let attest_wire = attest.to_wire_bytes();
+        let pk = side.public_bytes();
+        let handle = CString::new("omar").unwrap();
+
+        let mut out_wire: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+        let status = unsafe {
+            sv_directory_entry_encode(
+                pk.as_ptr(),
+                handle.as_ptr(),
+                attest_wire.as_ptr(),
+                attest_wire.len(),
+                &mut out_wire,
+                &mut out_len,
+            )
+        };
+        assert_eq!(status, SvStatus::Ok);
+        let bytes = unsafe { std::slice::from_raw_parts(out_wire, out_len) }.to_vec();
+
+        let entry = DirectoryEntryPayload::decode(&bytes).unwrap();
+        assert_eq!(entry.side, pk);
+        assert_eq!(entry.handle, "omar");
+        assert_eq!(entry.attestations.len(), 1);
+
+        unsafe {
+            let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(out_wire, out_len));
+        }
+    }
+
+    #[test]
+    fn blake3_matches_reference_for_known_input() {
+        let msg = b"abc";
+        let mut out = [0u8; 32];
+        let status = unsafe { sv_blake3(msg.as_ptr(), msg.len(), out.as_mut_ptr()) };
+        assert_eq!(status, SvStatus::Ok);
+        // BLAKE3 of "abc" — canonical reference vector.
+        let expected =
+            hex::decode("6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85")
+                .unwrap();
+        assert_eq!(&out[..], &expected[..]);
+    }
+
+    #[test]
+    fn blake3_handles_empty_message() {
+        let mut out = [0u8; 32];
+        let status = unsafe { sv_blake3(std::ptr::null(), 0, out.as_mut_ptr()) };
+        assert_eq!(status, SvStatus::Ok);
+        let expected =
+            hex::decode("af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262")
+                .unwrap();
+        assert_eq!(&out[..], &expected[..]);
+    }
+
+    #[test]
+    fn directory_entry_encode_rejects_mismatched_handle() {
+        use std::ffi::CString;
+
+        let side = fresh_side("test");
+        let attest = HandleAttestPayload::sign(&side, "omar", 1_700_000_000).unwrap();
+        let attest_wire = attest.to_wire_bytes();
+        let pk = side.public_bytes();
+        let handle = CString::new("not-omar").unwrap();
+
+        let mut out_wire: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+        let status = unsafe {
+            sv_directory_entry_encode(
+                pk.as_ptr(),
+                handle.as_ptr(),
+                attest_wire.as_ptr(),
+                attest_wire.len(),
+                &mut out_wire,
+                &mut out_len,
+            )
+        };
+        assert_eq!(status, SvStatus::InvalidInput);
+        assert!(out_wire.is_null());
     }
 }

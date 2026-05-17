@@ -1,0 +1,4 @@
+module SideversFFI {
+    header "sidevers.h"
+    export *
+}

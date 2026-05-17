@@ -1,0 +1,122 @@
+name: release
+
+# Build full-stack release artefacts (CLI + node + desktop GUI) on every OS.
+# Trigger manually from the Actions tab, or by pushing a v* tag.
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+jobs:
+  desktop:
+    name: ${{ matrix.platform.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { os: ubuntu-22.04,  label: 'linux-x64',       target: 'x86_64-unknown-linux-gnu', bundles: 'deb,appimage,rpm' }
+          - { os: windows-latest, label: 'windows-x64',     target: 'x86_64-pc-windows-msvc',   bundles: 'msi,nsis'         }
+          - { os: macos-latest,   label: 'macos-universal', target: 'universal-apple-darwin',   bundles: 'app,dmg'          }
+
+    runs-on: ${{ matrix.platform.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.target }}
+
+      # macOS needs both arches for the universal target.
+      - name: Add macOS x86_64 target
+        if: matrix.platform.os == 'macos-latest'
+        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+
+      - name: Install Linux Tauri dependencies
+        if: matrix.platform.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            librsvg2-dev \
+            libayatana-appindicator3-dev \
+            patchelf
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            desktop/tauri
+
+      # ───────────────────────── CLI + node binaries ─────────────────────────
+      - name: Build CLI + node (host)
+        if: matrix.platform.os != 'macos-latest'
+        run: cargo build --release -p sidevers-cli -p sidevers-node -p sidevers-ffi --target ${{ matrix.platform.target }}
+
+      - name: Build CLI + node (macOS universal via lipo)
+        if: matrix.platform.os == 'macos-latest'
+        run: |
+          cargo build --release -p sidevers-cli -p sidevers-node -p sidevers-ffi --target aarch64-apple-darwin
+          cargo build --release -p sidevers-cli -p sidevers-node -p sidevers-ffi --target x86_64-apple-darwin
+          mkdir -p target/${{ matrix.platform.target }}/release
+          for bin in sidevers sidevers-node; do
+            lipo -create \
+              target/aarch64-apple-darwin/release/$bin \
+              target/x86_64-apple-darwin/release/$bin \
+              -output target/${{ matrix.platform.target }}/release/$bin
+          done
+          for lib in libsidevers.dylib libsidevers.a; do
+            lipo -create \
+              target/aarch64-apple-darwin/release/$lib \
+              target/x86_64-apple-darwin/release/$lib \
+              -output target/${{ matrix.platform.target }}/release/$lib
+          done
+
+      # ───────────────────────── Desktop GUI (Tauri) ─────────────────────────
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Build Tauri app
+        working-directory: desktop/tauri
+        run: cargo tauri build --target ${{ matrix.platform.target }} --bundles ${{ matrix.platform.bundles }}
+
+      # ───────────────────────── Stage + upload ─────────────────────────
+      - name: Stage artefacts (Unix)
+        if: matrix.platform.os != 'windows-latest'
+        shell: bash
+        run: |
+          OUT="staging/${{ matrix.platform.label }}"
+          mkdir -p "$OUT/bin" "$OUT/lib" "$OUT/gui"
+          cp target/${{ matrix.platform.target }}/release/sidevers       "$OUT/bin/"
+          cp target/${{ matrix.platform.target }}/release/sidevers-node  "$OUT/bin/"
+          cp crates/sidevers-ffi/include/sidevers.h                      "$OUT/lib/"
+          # FFI libs
+          cp target/${{ matrix.platform.target }}/release/libsidevers.a            "$OUT/lib/" 2>/dev/null || true
+          cp target/${{ matrix.platform.target }}/release/libsidevers.so           "$OUT/lib/" 2>/dev/null || true
+          cp target/${{ matrix.platform.target }}/release/libsidevers.dylib        "$OUT/lib/" 2>/dev/null || true
+          # Tauri bundles (per-platform)
+          cp -R desktop/tauri/target/${{ matrix.platform.target }}/release/bundle/* "$OUT/gui/" 2>/dev/null || true
+
+      - name: Stage artefacts (Windows)
+        if: matrix.platform.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $out = "staging/${{ matrix.platform.label }}"
+          New-Item -ItemType Directory -Force -Path "$out/bin","$out/lib","$out/gui" | Out-Null
+          Copy-Item "target/${{ matrix.platform.target }}/release/sidevers.exe"      "$out/bin/"
+          Copy-Item "target/${{ matrix.platform.target }}/release/sidevers-node.exe" "$out/bin/"
+          Copy-Item "crates/sidevers-ffi/include/sidevers.h"                         "$out/lib/"
+          Copy-Item "target/${{ matrix.platform.target }}/release/sidevers.dll"      "$out/lib/" -ErrorAction SilentlyContinue
+          Copy-Item "target/${{ matrix.platform.target }}/release/libsidevers.a"     "$out/lib/" -ErrorAction SilentlyContinue
+          if (Test-Path "desktop/tauri/target/${{ matrix.platform.target }}/release/bundle") {
+            Copy-Item "desktop/tauri/target/${{ matrix.platform.target }}/release/bundle/*" "$out/gui/" -Recurse
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sidevers-${{ matrix.platform.label }}
+          path: staging/${{ matrix.platform.label }}
+          if-no-files-found: error

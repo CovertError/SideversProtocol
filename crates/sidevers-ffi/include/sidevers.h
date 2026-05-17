@@ -367,6 +367,46 @@ SvStatus sv_verify_signature(const uint8_t *pubkey_32,
                              uintptr_t msg_len,
                              const uint8_t *sig_64);
 
+/**
+ * Compute a 32-byte BLAKE3 hash of an arbitrary message. Used by the
+ * Laravel registry as a content-address for HTTP ETag caching — the
+ * same hash function the protocol uses for canonical signing, so a
+ * page's BLAKE3 is stable across re-encodings.
+ *
+ * Inputs:
+ *   * `msg_ptr` / `msg_len` — the bytes to hash.
+ *
+ * Output:
+ *   * `out_hash_32` — writable 32-byte buffer.
+ */
+SvStatus sv_blake3(const uint8_t *msg_ptr, uintptr_t msg_len, uint8_t *out_hash_32);
+
+/**
+ * Compose a `DirectoryEntryPayload` for a single handle from its parts.
+ *
+ * The registry stores claimed handles with their already-signed
+ * `HandleAttest` wire bytes; this function takes that wire (plus the
+ * side pubkey and handle for redundant validation) and produces the
+ * canonical CBOR encoding the registry serves at
+ * `/.well-known/sidevers/resolve/{handle}`.
+ *
+ * Inputs:
+ *   * `side_pk_32` — the 32-byte side public key that owns the handle.
+ *   * `handle` — NUL-terminated UTF-8 handle string.
+ *   * `attestation_wire_ptr` / `attestation_wire_len` — the signed
+ *     `HandleAttestPayload` bytes (will be verified before composition).
+ *
+ * Outputs:
+ *   * `*out_wire_ptr` / `*out_wire_len` — heap-allocated CBOR bytes;
+ *     free with [`sv_free_buffer`](crate::sv_free_buffer).
+ */
+SvStatus sv_directory_entry_encode(const uint8_t *side_pk_32,
+                                   const char *handle,
+                                   const uint8_t *attestation_wire_ptr,
+                                   uintptr_t attestation_wire_len,
+                                   uint8_t **out_wire_ptr,
+                                   uintptr_t *out_wire_len);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif  // __cplusplus
