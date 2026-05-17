@@ -2206,10 +2206,47 @@ function attachStaticHandlers() {
         filename,
         passphrase,
       });
-      // Clear the passphrase fields so they don't linger in the DOM.
       $("settings-backup-passphrase").value = "";
       $("settings-backup-passphrase-confirm").value = "";
       showOk(`Encrypted seed saved to ${written}`);
+    }),
+  );
+
+  $("settings-update-check")?.addEventListener("click", () =>
+    safe(async () => {
+      const statusEl = $("settings-update-status");
+      const versionEl = $("settings-update-version");
+      const installRow = $("settings-update-install-row");
+      statusEl.textContent = t("settings.updates_checking") || "Checking…";
+      versionEl.textContent = "";
+      installRow.hidden = true;
+      const result = await call("check_for_updates", {});
+      if (result.status === "available") {
+        statusEl.textContent =
+          t("settings.updates_available", { version: result.version }) ||
+          `Version ${result.version} is available.`;
+        versionEl.textContent = result.notes || "";
+        installRow.hidden = false;
+      } else if (result.status === "uptodate") {
+        statusEl.textContent =
+          t("settings.updates_uptodate") ||
+          "You're on the latest version.";
+      } else {
+        statusEl.textContent =
+          t("settings.updates_error", { message: result.message }) ||
+          `Update check failed: ${result.message}`;
+      }
+    }),
+  );
+
+  $("settings-update-install")?.addEventListener("click", () =>
+    safe(async () => {
+      const statusEl = $("settings-update-status");
+      statusEl.textContent =
+        t("settings.updates_installing") ||
+        "Downloading… the app will restart when finished.";
+      $("settings-update-install").disabled = true;
+      await call("apply_pending_update", {});
     }),
   );
 

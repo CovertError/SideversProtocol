@@ -2571,8 +2571,84 @@ fn open_dm(recipient_seed_hex: String, wire_hex: String) -> Result<String, Strin
 // Entrypoint
 // ---------------------------------------------------------------------
 
+// ---------------------------------------------------------------------
+// Updater command — wraps tauri-plugin-updater so the frontend can offer
+// a "Check for updates" menu item. The actual update endpoint and
+// signing pubkey live in tauri.conf.json; see docs/RELEASING.md for the
+// one-time keypair-generation flow.
+// ---------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct UpdateAvailable {
+    version: String,
+    notes: Option<String>,
+    date: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "lowercase")]
+enum UpdateCheckResult {
+    Available(UpdateAvailable),
+    UpToDate,
+    Error { message: String },
+}
+
+#[tauri::command]
+async fn check_for_updates(app: tauri::AppHandle) -> UpdateCheckResult {
+    use tauri_plugin_updater::UpdaterExt;
+
+    let updater = match app.updater() {
+        Ok(u) => u,
+        Err(e) => {
+            return UpdateCheckResult::Error {
+                message: format!("updater unavailable: {e}"),
+            };
+        }
+    };
+    match updater.check().await {
+        Ok(Some(update)) => UpdateCheckResult::Available(UpdateAvailable {
+            version: update.version.clone(),
+            notes: update.body.clone(),
+            date: update.date.map(|d| d.to_string()),
+        }),
+        Ok(None) => UpdateCheckResult::UpToDate,
+        Err(e) => UpdateCheckResult::Error {
+            message: e.to_string(),
+        },
+    }
+}
+
+#[tauri::command]
+async fn apply_pending_update(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no update available".to_string())?;
+
+    let mut downloaded: usize = 0;
+    update
+        .download_and_install(
+            |chunk_len, _content_len| {
+                downloaded += chunk_len;
+            },
+            || { /* finished */ },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // tauri-plugin-updater restarts the app for us after install on
+    // desktop. On the unlikely chance it returns control, ask the
+    // process to exit so the OS-level installer can complete.
+    app.restart();
+}
+
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             // Live-node commands (Phase 1.5h: client networking)
@@ -2628,6 +2704,9 @@ fn main() {
             encode_address,
             seal_dm,
             open_dm,
+            // Updater (Phase 1 of the GitHub-Releases distribution plan)
+            check_for_updates,
+            apply_pending_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

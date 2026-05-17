@@ -1596,7 +1596,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "sidevers-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1610,7 +1610,7 @@ dependencies = [
 
 [[package]]
 name = "sidevers-conformance"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "hex",
@@ -1624,7 +1624,7 @@ dependencies = [
 
 [[package]]
 name = "sidevers-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "argon2",
  "bech32",
@@ -1649,7 +1649,7 @@ dependencies = [
 
 [[package]]
 name = "sidevers-ffi"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "cbindgen",
@@ -1660,7 +1660,7 @@ dependencies = [
 
 [[package]]
 name = "sidevers-net"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "bytes",
@@ -1686,7 +1686,7 @@ dependencies = [
 
 [[package]]
 name = "sidevers-node"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1703,7 +1703,7 @@ dependencies = [
 
 [[package]]
 name = "sidevers-storage"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "bytes",

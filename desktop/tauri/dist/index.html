@@ -662,9 +662,38 @@
             </div>
 
             <div class="sv-form-section">
+              <div class="sv-form-title" data-i18n="settings.updates_h">Updates</div>
+              <p class="sv-form-sub" data-i18n="settings.updates_sub">
+                Sidevers checks GitHub Releases for newer signed builds.
+                Updates are verified against the release signing key before
+                they install.
+              </p>
+              <div class="sv-setting-row">
+                <div class="sv-setting-label">
+                  <span class="sv-setting-name" id="settings-update-status"
+                        data-i18n="settings.updates_status_idle">
+                    Click below to check for updates.
+                  </span>
+                  <span class="sv-setting-hint" id="settings-update-version"></span>
+                </div>
+                <button id="settings-update-check"
+                        data-i18n="btn.check_updates">Check for updates</button>
+              </div>
+              <div class="sv-field-row" id="settings-update-install-row" hidden>
+                <button id="settings-update-install"
+                        data-i18n="btn.install_update">
+                  Download and install
+                </button>
+              </div>
+            </div>
+
+            <div class="sv-form-section">
               <div class="sv-form-title" data-i18n="settings.about_h">About</div>
               <p class="sv-form-sub" data-i18n="settings.about_sub">
                 Sidevers reference client — peer-to-peer messaging without a server.
+              </p>
+              <p class="sv-form-sub">
+                Version <code id="settings-app-version">0.1.1</code>
               </p>
             </div>
           </div>
