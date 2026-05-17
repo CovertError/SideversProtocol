@@ -17,6 +17,7 @@ hex = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 rusqlite = { workspace = true }
+subtle = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 

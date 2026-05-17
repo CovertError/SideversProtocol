@@ -99,51 +99,62 @@ async fn listen(side_path: &Path, port: u16, data_dir: &Path) -> Result<()> {
 /// `sidevers-cli` and bring the unsealed seed into a tmpfs/ephemeral file.
 const ENV_SEED_PASSPHRASE: &str = "SIDEVERS_SEED_PASSPHRASE";
 
-/// Read a seed file, supporting both legacy 32-byte plaintext seeds and
-/// the new passphrase-sealed format (`sidevers_core::keystore`). Sealed
-/// files require `SIDEVERS_SEED_PASSPHRASE` to be set in the environment.
+/// Top-level seed reader: pulls the passphrase from the env when needed.
 fn read_seed(path: &Path) -> Result<[u8; SECRET_KEY_LEN]> {
     let raw = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let passphrase = std::env::var(ENV_SEED_PASSPHRASE).ok();
+    parse_seed_bytes(&raw, passphrase.as_deref(), path)
+}
+
+/// Pure seed parser, exposed so tests can avoid global env-var manipulation.
+///
+/// Supports both legacy 32-byte plaintext seeds (back-compat for existing
+/// deployments) and the new `sidevers_core::keystore` passphrase-sealed
+/// CBOR format. For sealed files, `passphrase` must be `Some(non-empty)`.
+fn parse_seed_bytes(
+    raw: &[u8],
+    passphrase: Option<&str>,
+    path_for_msgs: &Path,
+) -> Result<[u8; SECRET_KEY_LEN]> {
     if raw.len() == SECRET_KEY_LEN {
-        // Legacy plaintext seed (still supported; warn at startup so
-        // operators know they're carrying the higher-exposure variant).
+        // Legacy plaintext seed. Still supported, but warn at startup so
+        // operators know they're carrying the higher-exposure variant.
         eprintln!(
-            "warning: {} is a plaintext seed file. Consider re-saving it as a passphrase-sealed seed (see sidevers-cli seed-seal).",
-            path.display()
+            "warning: {} is a plaintext seed file. Consider re-saving it as a passphrase-sealed seed.",
+            path_for_msgs.display()
         );
         let mut arr = [0u8; SECRET_KEY_LEN];
-        arr.copy_from_slice(&raw);
+        arr.copy_from_slice(raw);
         return Ok(arr);
     }
-    // Otherwise treat it as a sealed-seed CBOR file. Pull the passphrase
-    // from the env (not the CLI args — keeping it off the process table).
-    let passphrase = std::env::var(ENV_SEED_PASSPHRASE).map_err(|_| {
+    let pw = passphrase.ok_or_else(|| {
         anyhow::anyhow!(
             "{} is not a plaintext seed (length {}); set {ENV_SEED_PASSPHRASE} to open it",
-            path.display(),
+            path_for_msgs.display(),
             raw.len()
         )
     })?;
-    if passphrase.is_empty() {
+    if pw.is_empty() {
         bail!("{ENV_SEED_PASSPHRASE} is empty");
     }
-    let seed = sidevers_core::keystore::open_seed(&raw, &passphrase)
-        .map_err(|e| anyhow::anyhow!("opening sealed seed {}: {e}", path.display()))?;
+    let seed = sidevers_core::keystore::open_seed(raw, pw)
+        .map_err(|e| anyhow::anyhow!("opening sealed seed {}: {e}", path_for_msgs.display()))?;
     Ok(seed)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
+    use std::path::Path;
+
+    fn dummy_path() -> &'static Path {
+        Path::new("/dev/null/sv-test-seed")
+    }
 
     #[test]
     fn plaintext_seed_still_loads() {
         let seed = [0xAAu8; SECRET_KEY_LEN];
-        let mut f = NamedTempFile::new().unwrap();
-        f.write_all(&seed).unwrap();
-        let loaded = read_seed(f.path()).unwrap();
+        let loaded = parse_seed_bytes(&seed, None, dummy_path()).unwrap();
         assert_eq!(loaded, seed);
     }
 
@@ -156,17 +167,7 @@ mod tests {
             &sidevers_core::keystore::Argon2Params::fast_for_tests(),
         )
         .unwrap();
-        let mut f = NamedTempFile::new().unwrap();
-        f.write_all(&sealed).unwrap();
-        // Safety: tests are single-threaded by default; setting env here is OK
-        // for the scope of this test (cleared at the end).
-        unsafe {
-            std::env::set_var(ENV_SEED_PASSPHRASE, "test-pass");
-        }
-        let loaded = read_seed(f.path()).unwrap();
-        unsafe {
-            std::env::remove_var(ENV_SEED_PASSPHRASE);
-        }
+        let loaded = parse_seed_bytes(&sealed, Some("test-pass"), dummy_path()).unwrap();
         assert_eq!(loaded, seed);
     }
 
@@ -179,21 +180,13 @@ mod tests {
             &sidevers_core::keystore::Argon2Params::fast_for_tests(),
         )
         .unwrap();
-        let mut f = NamedTempFile::new().unwrap();
-        f.write_all(&sealed).unwrap();
-        unsafe {
-            std::env::set_var(ENV_SEED_PASSPHRASE, "wrong");
-        }
-        let err = read_seed(f.path()).unwrap_err();
-        unsafe {
-            std::env::remove_var(ENV_SEED_PASSPHRASE);
-        }
+        let err = parse_seed_bytes(&sealed, Some("wrong"), dummy_path()).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("opening sealed seed"), "got: {msg}");
     }
 
     #[test]
-    fn sealed_seed_without_env_var_errors_clearly() {
+    fn sealed_seed_without_passphrase_errors_clearly() {
         let seed = [0xDDu8; SECRET_KEY_LEN];
         let sealed = sidevers_core::keystore::seal_seed_with(
             &seed,
@@ -201,13 +194,22 @@ mod tests {
             &sidevers_core::keystore::Argon2Params::fast_for_tests(),
         )
         .unwrap();
-        let mut f = NamedTempFile::new().unwrap();
-        f.write_all(&sealed).unwrap();
-        unsafe {
-            std::env::remove_var(ENV_SEED_PASSPHRASE);
-        }
-        let err = read_seed(f.path()).unwrap_err();
+        let err = parse_seed_bytes(&sealed, None, dummy_path()).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains(ENV_SEED_PASSPHRASE), "got: {msg}");
+    }
+
+    #[test]
+    fn empty_passphrase_for_sealed_seed_errors_clearly() {
+        let seed = [0xEEu8; SECRET_KEY_LEN];
+        let sealed = sidevers_core::keystore::seal_seed_with(
+            &seed,
+            "p",
+            &sidevers_core::keystore::Argon2Params::fast_for_tests(),
+        )
+        .unwrap();
+        let err = parse_seed_bytes(&sealed, Some(""), dummy_path()).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("is empty"), "got: {msg}");
     }
 }

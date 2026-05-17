@@ -3,8 +3,9 @@
 
 use sidevers_core::keys::{PUBLIC_KEY_LEN, SECRET_KEY_LEN, SideKey};
 use sidevers_core::linkage::LinkageProof;
+use zeroize::Zeroize;
 
-use crate::error::{SvStatus, set_last_error, status_from};
+use crate::error::{SvStatus, ffi_entry, set_last_error, status_from};
 use crate::mem::vec_to_ffi;
 
 /// Sign a fresh linkage proof binding `side_a` and `side_b` (both belonging
@@ -26,35 +27,40 @@ pub unsafe extern "C" fn sv_linkage_sign(
     out_wire_ptr: *mut *mut u8,
     out_wire_len: *mut usize,
 ) -> SvStatus {
-    if side_a_seed_32.is_null()
-        || side_b_seed_32.is_null()
-        || out_wire_ptr.is_null()
-        || out_wire_len.is_null()
-    {
-        set_last_error("sv_linkage_sign: null pointer argument");
-        return SvStatus::NullPtr;
-    }
-    // SAFETY: caller contract.
-    let a = unsafe { std::slice::from_raw_parts(side_a_seed_32, SECRET_KEY_LEN) };
-    let b = unsafe { std::slice::from_raw_parts(side_b_seed_32, SECRET_KEY_LEN) };
-    let mut a_arr = [0u8; SECRET_KEY_LEN];
-    let mut b_arr = [0u8; SECRET_KEY_LEN];
-    a_arr.copy_from_slice(a);
-    b_arr.copy_from_slice(b);
-    let side_a = SideKey::from_seed(&a_arr, "(ffi-linkage-a)");
-    let side_b = SideKey::from_seed(&b_arr, "(ffi-linkage-b)");
-
-    let result = LinkageProof::sign(&side_a, &side_b, issued_at).map(|p| p.to_wire_bytes());
-    let (status, wire) = status_from(result);
-    if let Some(bytes) = wire {
-        let (ptr, len) = vec_to_ffi(bytes);
-        // SAFETY: caller contract.
-        unsafe {
-            std::ptr::write(out_wire_ptr, ptr);
-            std::ptr::write(out_wire_len, len);
+    ffi_entry("sv_linkage_sign", || {
+        if side_a_seed_32.is_null()
+            || side_b_seed_32.is_null()
+            || out_wire_ptr.is_null()
+            || out_wire_len.is_null()
+        {
+            set_last_error("sv_linkage_sign: null pointer argument");
+            return SvStatus::NullPtr;
         }
-    }
-    status
+        // SAFETY: caller contract.
+        let a = unsafe { std::slice::from_raw_parts(side_a_seed_32, SECRET_KEY_LEN) };
+        let b = unsafe { std::slice::from_raw_parts(side_b_seed_32, SECRET_KEY_LEN) };
+        let mut a_arr = [0u8; SECRET_KEY_LEN];
+        let mut b_arr = [0u8; SECRET_KEY_LEN];
+        a_arr.copy_from_slice(a);
+        b_arr.copy_from_slice(b);
+        let side_a = SideKey::from_seed(&a_arr, "(ffi-linkage-a)");
+        let side_b = SideKey::from_seed(&b_arr, "(ffi-linkage-b)");
+        // Audit P1.A — wipe the stack copies of both seeds.
+        a_arr.zeroize();
+        b_arr.zeroize();
+
+        let result = LinkageProof::sign(&side_a, &side_b, issued_at).map(|p| p.to_wire_bytes());
+        let (status, wire) = status_from(result);
+        if let Some(bytes) = wire {
+            let (ptr, len) = vec_to_ffi(bytes);
+            // SAFETY: caller contract.
+            unsafe {
+                std::ptr::write(out_wire_ptr, ptr);
+                std::ptr::write(out_wire_len, len);
+            }
+        }
+        status
+    })
 }
 
 /// Verify a linkage-proof wire encoding and extract the two side public
@@ -74,24 +80,26 @@ pub unsafe extern "C" fn sv_linkage_verify(
     out_side_b_32: *mut u8,
     out_issued_at: *mut u64,
 ) -> SvStatus {
-    if wire_ptr.is_null()
-        || out_side_a_32.is_null()
-        || out_side_b_32.is_null()
-        || out_issued_at.is_null()
-    {
-        set_last_error("sv_linkage_verify: null pointer argument");
-        return SvStatus::NullPtr;
-    }
-    // SAFETY: caller contract.
-    let wire = unsafe { std::slice::from_raw_parts(wire_ptr, wire_len) };
-    let (status, proof) = status_from(LinkageProof::from_wire_bytes(wire));
-    if let Some(p) = proof {
-        // SAFETY: caller contract.
-        unsafe {
-            std::ptr::copy_nonoverlapping(p.side_a.as_ptr(), out_side_a_32, PUBLIC_KEY_LEN);
-            std::ptr::copy_nonoverlapping(p.side_b.as_ptr(), out_side_b_32, PUBLIC_KEY_LEN);
-            std::ptr::write(out_issued_at, p.issued_at);
+    ffi_entry("sv_linkage_verify", || {
+        if wire_ptr.is_null()
+            || out_side_a_32.is_null()
+            || out_side_b_32.is_null()
+            || out_issued_at.is_null()
+        {
+            set_last_error("sv_linkage_verify: null pointer argument");
+            return SvStatus::NullPtr;
         }
-    }
-    status
+        // SAFETY: caller contract.
+        let wire = unsafe { std::slice::from_raw_parts(wire_ptr, wire_len) };
+        let (status, proof) = status_from(LinkageProof::from_wire_bytes(wire));
+        if let Some(p) = proof {
+            // SAFETY: caller contract.
+            unsafe {
+                std::ptr::copy_nonoverlapping(p.side_a.as_ptr(), out_side_a_32, PUBLIC_KEY_LEN);
+                std::ptr::copy_nonoverlapping(p.side_b.as_ptr(), out_side_b_32, PUBLIC_KEY_LEN);
+                std::ptr::write(out_issued_at, p.issued_at);
+            }
+        }
+        status
+    })
 }

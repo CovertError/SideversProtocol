@@ -20,6 +20,7 @@ pub mod log_id;
 pub mod messages;
 pub mod payload;
 pub mod replay;
+pub mod sas;
 pub mod verse;
 
 pub use address::{Address, AddressKind};
@@ -40,3 +41,4 @@ pub use messages::public::{
 };
 pub use messages::retirement::SideRetirementPayload;
 pub use messages::storage_prefs::StoragePreferences;
+pub use sas::{SAS_WORD_COUNT, pairing_sas, pairing_sas_string};

@@ -26,6 +26,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 mod address;
+mod contact;
 mod dm;
 mod error;
 mod keys;
@@ -33,6 +34,7 @@ mod linkage;
 mod mem;
 
 pub use address::*;
+pub use contact::*;
 pub use dm::*;
 pub use error::*;
 pub use keys::*;

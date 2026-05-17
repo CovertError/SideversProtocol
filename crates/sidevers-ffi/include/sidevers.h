@@ -85,6 +85,13 @@ enum SvStatus
      * The OS CSPRNG is unavailable.
      */
     SvStatus_CsprngUnavailable = -6,
+    /**
+     * A Rust panic was caught at the FFI boundary. Indicates a bug; the
+     * process is in a defined state but the operation did not complete.
+     * (Audit P1.B: panics that unwind across a C-ABI boundary are UB; this
+     * status lets the caller see the failure instead of corrupting state.)
+     */
+    SvStatus_Panic = -7,
 };
 #ifndef __cplusplus
 typedef int32_t SvStatus;
@@ -113,6 +120,51 @@ char *sv_address_encode(const uint8_t *pubkey_32, SvAddressKind kind);
 SvStatus sv_address_decode(const char *addr,
                            uint8_t *out_pubkey_32,
                            SvAddressKind *out_kind);
+
+/**
+ * Encode a contact-card invite URI (`sidevers-contact:1:<base32>`).
+ *
+ * Inputs:
+ *   * `side_32` — the inviter's side public key (Ed25519, 32 bytes). Required.
+ *   * `dial_addr` — NUL-terminated UTF-8 host:port the friend's client should dial
+ *     (e.g. `"203.0.113.5:4242"`). Required, 1–256 bytes.
+ *   * `display_name` — NUL-terminated UTF-8 hint shown on first encounter, or
+ *     `NULL` to omit. Max 512 bytes.
+ *   * `side_label` — NUL-terminated UTF-8 context hint (e.g. `"work"`), or
+ *     `NULL` to omit. Max 64 bytes.
+ *
+ * Output:
+ *   * `*out_uri` — heap-allocated NUL-terminated C string. Free with
+ *     [`sv_free_string`](crate::sv_free_string).
+ */
+SvStatus sv_contact_card_encode(const uint8_t *side_32,
+                                const char *dial_addr,
+                                const char *display_name,
+                                const char *side_label,
+                                char **out_uri);
+
+/**
+ * Parse a contact-card invite URI back into its fields.
+ *
+ * Inputs:
+ *   * `uri` — NUL-terminated UTF-8 `"sidevers-contact:1:<base32>"`.
+ *
+ * Outputs (all required pointers):
+ *   * `out_side_32` — writable 32-byte buffer for the inviter's side pubkey.
+ *   * `*out_dial_addr` — heap-allocated NUL-terminated C string, always set on success.
+ *   * `*out_display_name` — heap-allocated NUL-terminated C string, OR `NULL` if the
+ *     URI did not include a display name.
+ *   * `*out_side_label` — heap-allocated NUL-terminated C string, OR `NULL` if the
+ *     URI did not include a side label.
+ *
+ * Each non-NULL returned string must be freed with [`sv_free_string`](crate::sv_free_string).
+ * On error, no outputs are modified.
+ */
+SvStatus sv_contact_card_parse(const char *uri,
+                               uint8_t *out_side_32,
+                               char **out_dial_addr,
+                               char **out_display_name,
+                               char **out_side_label);
 
 /**
  * Build a signed, encrypted DirectMessage envelope ready for the wire.

@@ -240,13 +240,7 @@ fn derive_kek(passphrase: &str, salt: &[u8], params: &Argon2Params) -> Result<[u
 
 /// Build the AEAD AAD — every format parameter that an attacker might
 /// otherwise tamper with to weaken the seal must be authenticated.
-fn build_aad(
-    version: u64,
-    kdf: &str,
-    aead: &str,
-    params: &Argon2Params,
-    salt: &[u8],
-) -> Vec<u8> {
+fn build_aad(version: u64, kdf: &str, aead: &str, params: &Argon2Params, salt: &[u8]) -> Vec<u8> {
     let mut w = CborWriter::new();
     w.write_array_header(7);
     w.write_u64(version);
@@ -420,7 +414,10 @@ mod tests {
         let seed = [0x02u8; SECRET_KEY_LEN];
         let s1 = seal_seed_with(&seed, "p", &fast()).unwrap();
         let s2 = seal_seed_with(&seed, "p", &fast()).unwrap();
-        assert_ne!(s1, s2, "two seals of the same seed must differ (random salt+nonce)");
+        assert_ne!(
+            s1, s2,
+            "two seals of the same seed must differ (random salt+nonce)"
+        );
         // Both should still open.
         assert_eq!(open_seed(&s1, "p").unwrap(), seed);
         assert_eq!(open_seed(&s2, "p").unwrap(), seed);
@@ -437,7 +434,13 @@ mod tests {
         // Could be DecryptionFailed (tag mismatch) or CborDecode (if we hit
         // structural bytes); both are acceptable rejection paths.
         assert!(
-            matches!(err, Error::DecryptionFailed | Error::CborDecode(_) | Error::CborNotCanonical(_) | Error::BadFieldLength { .. }),
+            matches!(
+                err,
+                Error::DecryptionFailed
+                    | Error::CborDecode(_)
+                    | Error::CborNotCanonical(_)
+                    | Error::BadFieldLength { .. }
+            ),
             "got {err:?}"
         );
     }
@@ -453,7 +456,10 @@ mod tests {
         // `cbor::text("salt")` = [0x64, 's','a','l','t']. The next byte
         // is the bstr header for a 16-byte string: 0x50.
         let needle = b"salt";
-        let pos = sealed.windows(4).position(|w| w == needle).expect("salt key present");
+        let pos = sealed
+            .windows(4)
+            .position(|w| w == needle)
+            .expect("salt key present");
         // header byte at pos+4 should be 0x50 (bstr(16)); flip first salt byte.
         assert_eq!(sealed[pos + 4], 0x50);
         sealed[pos + 5] ^= 0xFF;
@@ -478,7 +484,10 @@ mod tests {
         // here because v=1 fits in head byte). The bytes around it:
         // ...text("version")=[0x67,'v','e','r','s','i','o','n'], then 0x01.
         let needle = b"version";
-        let pos = sealed.windows(7).position(|w| w == needle).expect("version key present");
+        let pos = sealed
+            .windows(7)
+            .position(|w| w == needle)
+            .expect("version key present");
         let value_byte_idx = pos + 7;
         // Current v=1 encoded as 0x01 (head byte uint, info=1).
         assert_eq!(sealed[value_byte_idx], 0x01);

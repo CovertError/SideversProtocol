@@ -334,8 +334,14 @@ fn unix_now() -> u64 {
 }
 
 fn verify_hash(bytes: &[u8], expected: &[u8; ADDRESS_LEN]) -> Result<()> {
+    use subtle::ConstantTimeEq;
     let got = blake3::hash(bytes);
-    if got.as_bytes() == expected {
+    // Constant-time compare (Audit P2.D). Not exploitable for confidentiality
+    // — the hash is over content the requester already knows — but auditors
+    // expect every hash compare in a crypto library to be constant-time, and
+    // a future use of `verify_hash` in an authentication context would
+    // otherwise be a footgun.
+    if bool::from(got.as_bytes().ct_eq(expected)) {
         Ok(())
     } else {
         Err(Error::HashMismatch {

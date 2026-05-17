@@ -17,17 +17,23 @@
 //!     malformed_payloads ≥ `MAX_MALFORMED`, the peer is hard-refused
 //!     (envelopes dropped before any per-envelope work).
 //!
-//! Out of scope (Phase 1.5+ work):
+//! Phase 1.5h+ — sybil defense (Audit P1.C):
+//!   - `IpSybilTracker` records distinct pubkeys per source IP within a
+//!     rolling window. The per-pubkey reputation is sybil-defeatable
+//!     because ephemeral sides cost nothing; the per-IP tracker raises
+//!     the cost of "spin up N fresh identities from one host" to a
+//!     bounded rate (operator-tunable).
+//!
+//! Out of scope (Phase 2+ work):
 //!   - Web-of-trust gossip filter (needs follow graph)
-//!   - Per-source IP rate limit at the QUIC transport layer
 //!   - Hint-accuracy tracking (storage layer feedback)
-//!   - Connection-refused enforcement at handshake time
 //!
 //! The receive path calls `ReputationTable::observe_envelope(peer)`
 //! BEFORE doing any expensive work; if the call returns `false`, the
 //! envelope is silently dropped with a `debug!` log line.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
@@ -246,6 +252,138 @@ impl Default for ReputationTable {
     }
 }
 
+// =========================================================================
+// Sybil defense — per-IP fresh-identity tracking (Audit P1.C)
+// =========================================================================
+
+/// Default window (seconds) over which `IpSybilTracker` counts distinct
+/// pubkeys per IP. 1 hour is generous: behind a CGNAT, a few users on the
+/// same egress IP rotating sides occasionally won't hit the cap.
+pub const SYBIL_WINDOW_SECS: u64 = 3600;
+
+/// Default max distinct pubkeys per IP within `SYBIL_WINDOW_SECS`. An
+/// attacker spinning up fresh ephemeral sides from one host exceeds this
+/// quickly; a real shared-NAT cohort comfortably fits beneath it.
+pub const SYBIL_MAX_NEW_PUBKEYS_PER_IP: usize = 16;
+
+/// State kept per source IP for sybil detection.
+#[derive(Debug, Clone)]
+pub struct IpSybilState {
+    /// Distinct pubkeys observed from this IP within the current window.
+    pub pubkeys: HashSet<[u8; 32]>,
+    /// Window-start time (unix seconds). When `now - window_start_at`
+    /// exceeds `SYBIL_WINDOW_SECS`, the set is cleared on next observe.
+    pub window_start_at: u64,
+    /// Total times this IP has been over-quota since process start
+    /// (saturating). Operator-visible for alerting.
+    pub over_quota_count: u32,
+}
+
+impl IpSybilState {
+    fn fresh(now: u64) -> Self {
+        Self {
+            pubkeys: HashSet::new(),
+            window_start_at: now,
+            over_quota_count: 0,
+        }
+    }
+}
+
+/// Policy knobs for `IpSybilTracker`.
+#[derive(Debug, Clone, Copy)]
+pub struct IpSybilPolicy {
+    pub window_secs: u64,
+    pub max_new_pubkeys_per_ip: usize,
+}
+
+impl Default for IpSybilPolicy {
+    fn default() -> Self {
+        Self {
+            window_secs: SYBIL_WINDOW_SECS,
+            max_new_pubkeys_per_ip: SYBIL_MAX_NEW_PUBKEYS_PER_IP,
+        }
+    }
+}
+
+/// Outcome of an `observe(peer, ip)` call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SybilDecision {
+    /// Allow the connection / envelope through.
+    Allow,
+    /// This IP has cycled too many distinct pubkeys in the current
+    /// window — refuse. Caller drops the connection / envelope without
+    /// running further work.
+    OverQuota,
+}
+
+/// Tracks distinct pubkeys observed per source IP within a rolling
+/// window. Designed to be called once per (peer, ip) pair at the
+/// connection-accept layer (after the per-IP handshake rate limit but
+/// before any per-peer reputation logic).
+///
+/// **Not yet wired into the accept loop** (Audit P1.C — infrastructure
+/// shipping in 1.5h, behavior change deferred so the operational policy
+/// can be tuned in a follow-up). Available immediately as a metric
+/// source for operators experimenting with thresholds.
+#[derive(Clone)]
+pub struct IpSybilTracker {
+    inner: Arc<Mutex<HashMap<IpAddr, IpSybilState>>>,
+    policy: IpSybilPolicy,
+}
+
+impl IpSybilTracker {
+    pub fn new(policy: IpSybilPolicy) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+            policy,
+        }
+    }
+
+    /// Record that `peer` has been seen from `ip` at `now`. Returns
+    /// `Allow` if the IP is within its fresh-identity quota for the
+    /// current window, `OverQuota` otherwise.
+    pub async fn observe(&self, peer: &[u8; 32], ip: IpAddr, now: u64) -> SybilDecision {
+        let mut g = self.inner.lock().await;
+        let state = g.entry(ip).or_insert_with(|| IpSybilState::fresh(now));
+
+        // Roll the window if it's expired.
+        if now.saturating_sub(state.window_start_at) >= self.policy.window_secs {
+            state.pubkeys.clear();
+            state.window_start_at = now;
+        }
+
+        // Already-known pubkey on this IP is free — only count
+        // newly-introduced identities against the quota.
+        if state.pubkeys.contains(peer) {
+            return SybilDecision::Allow;
+        }
+
+        if state.pubkeys.len() >= self.policy.max_new_pubkeys_per_ip {
+            state.over_quota_count = state.over_quota_count.saturating_add(1);
+            return SybilDecision::OverQuota;
+        }
+
+        state.pubkeys.insert(*peer);
+        SybilDecision::Allow
+    }
+
+    /// Snapshot the state for an IP (for tests and metrics).
+    pub async fn get(&self, ip: &IpAddr) -> Option<IpSybilState> {
+        self.inner.lock().await.get(ip).cloned()
+    }
+
+    /// Number of tracked source IPs.
+    pub async fn tracked_ips(&self) -> usize {
+        self.inner.lock().await.len()
+    }
+}
+
+impl Default for IpSybilTracker {
+    fn default() -> Self {
+        Self::new(IpSybilPolicy::default())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,5 +471,92 @@ mod tests {
         t.refuse(&peer, 1).await;
         assert!(t.is_refused(&peer).await);
         assert!(!t.observe_envelope(&peer, 2).await);
+    }
+
+    // ---- IpSybilTracker (Audit P1.C) ----
+
+    fn tight_sybil_policy() -> IpSybilPolicy {
+        IpSybilPolicy {
+            window_secs: 10,
+            max_new_pubkeys_per_ip: 3,
+        }
+    }
+
+    #[tokio::test]
+    async fn sybil_tracker_allows_under_quota() {
+        let s = IpSybilTracker::new(tight_sybil_policy());
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        for i in 0..3u8 {
+            let peer = [i; 32];
+            assert_eq!(s.observe(&peer, ip, 100).await, SybilDecision::Allow);
+        }
+        let state = s.get(&ip).await.unwrap();
+        assert_eq!(state.pubkeys.len(), 3);
+        assert_eq!(state.over_quota_count, 0);
+    }
+
+    #[tokio::test]
+    async fn sybil_tracker_refuses_fourth_distinct_pubkey() {
+        let s = IpSybilTracker::new(tight_sybil_policy());
+        let ip: IpAddr = "10.0.0.2".parse().unwrap();
+        for i in 0..3u8 {
+            assert_eq!(s.observe(&[i; 32], ip, 100).await, SybilDecision::Allow);
+        }
+        // Fourth fresh pubkey from the same IP within the window.
+        assert_eq!(
+            s.observe(&[99u8; 32], ip, 100).await,
+            SybilDecision::OverQuota
+        );
+        let state = s.get(&ip).await.unwrap();
+        assert_eq!(state.over_quota_count, 1);
+        // The over-quota pubkey is NOT added to the set (so a recovery
+        // window doesn't include it).
+        assert_eq!(state.pubkeys.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn sybil_tracker_already_known_pubkey_is_free() {
+        let s = IpSybilTracker::new(tight_sybil_policy());
+        let ip: IpAddr = "10.0.0.3".parse().unwrap();
+        let peer = [0x11; 32];
+        assert_eq!(s.observe(&peer, ip, 100).await, SybilDecision::Allow);
+        // Re-observe the same pubkey 5 more times within the window —
+        // still under quota because we count distinct identities.
+        for _ in 0..5 {
+            assert_eq!(s.observe(&peer, ip, 100).await, SybilDecision::Allow);
+        }
+        let state = s.get(&ip).await.unwrap();
+        assert_eq!(state.pubkeys.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn sybil_tracker_resets_after_window() {
+        let s = IpSybilTracker::new(tight_sybil_policy());
+        let ip: IpAddr = "10.0.0.4".parse().unwrap();
+        for i in 0..3u8 {
+            assert_eq!(s.observe(&[i; 32], ip, 100).await, SybilDecision::Allow);
+        }
+        assert_eq!(
+            s.observe(&[99u8; 32], ip, 100).await,
+            SybilDecision::OverQuota
+        );
+        // After the window rolls over (10s), the set is cleared.
+        assert_eq!(s.observe(&[99u8; 32], ip, 200).await, SybilDecision::Allow);
+        let state = s.get(&ip).await.unwrap();
+        assert_eq!(state.pubkeys.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn sybil_tracker_separate_ips_have_separate_quotas() {
+        let s = IpSybilTracker::new(tight_sybil_policy());
+        let ip1: IpAddr = "10.0.0.5".parse().unwrap();
+        let ip2: IpAddr = "10.0.0.6".parse().unwrap();
+        for i in 0..3u8 {
+            assert_eq!(s.observe(&[i; 32], ip1, 100).await, SybilDecision::Allow);
+        }
+        // ip1 is now full. ip2 starts fresh.
+        for i in 100..103u8 {
+            assert_eq!(s.observe(&[i; 32], ip2, 100).await, SybilDecision::Allow);
+        }
     }
 }

@@ -308,6 +308,135 @@ fn linkage_verify_tampered_fails() {
 }
 
 #[test]
+fn contact_card_encode_then_parse_round_trips_through_real_ffi() {
+    // Alice mints her side, packs it into a contact card, hands the URI to
+    // Bob's client out-of-band, Bob parses it and now knows where to dial.
+    // This is the bootstrap-from-zero path: no Sidevers server involved.
+    let mut alice_master = [0u8; 32];
+    unsafe { sv_keygen_master(alice_master.as_mut_ptr()) };
+    let mut alice_side_seed = [0u8; 32];
+    let label = cstr("public");
+    unsafe {
+        sv_derive_side(
+            alice_master.as_ptr(),
+            label.as_ptr(),
+            alice_side_seed.as_mut_ptr(),
+        )
+    };
+    let mut alice_pk = [0u8; 32];
+    unsafe { sv_pubkey_from_seed(alice_side_seed.as_ptr(), alice_pk.as_mut_ptr()) };
+
+    let dial = cstr("203.0.113.42:4242");
+    let name = cstr("Alice");
+    let role = cstr("public");
+    let mut uri_ptr: *mut std::os::raw::c_char = std::ptr::null_mut();
+    let status = unsafe {
+        sv_contact_card_encode(
+            alice_pk.as_ptr(),
+            dial.as_ptr(),
+            name.as_ptr(),
+            role.as_ptr(),
+            &mut uri_ptr,
+        )
+    };
+    assert_eq!(status, SvStatus::Ok);
+    assert!(!uri_ptr.is_null());
+    let uri = unsafe { CStr::from_ptr(uri_ptr) }.to_str().unwrap();
+    assert!(uri.starts_with("sidevers-contact:1:"));
+
+    let mut out_side = [0u8; 32];
+    let mut out_dial: *mut std::os::raw::c_char = std::ptr::null_mut();
+    let mut out_name: *mut std::os::raw::c_char = std::ptr::null_mut();
+    let mut out_label: *mut std::os::raw::c_char = std::ptr::null_mut();
+    let status = unsafe {
+        sv_contact_card_parse(
+            uri_ptr,
+            out_side.as_mut_ptr(),
+            &mut out_dial,
+            &mut out_name,
+            &mut out_label,
+        )
+    };
+    assert_eq!(status, SvStatus::Ok);
+    assert_eq!(out_side, alice_pk);
+    assert_eq!(
+        unsafe { CStr::from_ptr(out_dial) }.to_str().unwrap(),
+        "203.0.113.42:4242"
+    );
+    assert_eq!(
+        unsafe { CStr::from_ptr(out_name) }.to_str().unwrap(),
+        "Alice"
+    );
+    assert_eq!(
+        unsafe { CStr::from_ptr(out_label) }.to_str().unwrap(),
+        "public"
+    );
+
+    unsafe {
+        sv_free_string(uri_ptr);
+        sv_free_string(out_dial);
+        sv_free_string(out_name);
+        sv_free_string(out_label);
+    }
+}
+
+#[test]
+fn contact_card_minimal_fields_parses_with_null_optionals() {
+    let side = [0xAAu8; 32];
+    let dial = cstr("[2001:db8::1]:4242");
+    let mut uri_ptr: *mut std::os::raw::c_char = std::ptr::null_mut();
+    let status = unsafe {
+        sv_contact_card_encode(
+            side.as_ptr(),
+            dial.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            &mut uri_ptr,
+        )
+    };
+    assert_eq!(status, SvStatus::Ok);
+
+    let mut out_side = [0u8; 32];
+    let mut out_dial: *mut std::os::raw::c_char = std::ptr::null_mut();
+    let mut out_name: *mut std::os::raw::c_char = std::ptr::null_mut();
+    let mut out_label: *mut std::os::raw::c_char = std::ptr::null_mut();
+    let status = unsafe {
+        sv_contact_card_parse(
+            uri_ptr,
+            out_side.as_mut_ptr(),
+            &mut out_dial,
+            &mut out_name,
+            &mut out_label,
+        )
+    };
+    assert_eq!(status, SvStatus::Ok);
+    assert_eq!(out_side, side);
+    assert!(out_name.is_null());
+    assert!(out_label.is_null());
+
+    unsafe {
+        sv_free_string(uri_ptr);
+        sv_free_string(out_dial);
+    }
+}
+
+#[test]
+fn contact_card_parse_rejects_non_sidevers_uri() {
+    let bogus = cstr("https://example.com");
+    let mut side = [0u8; 32];
+    let mut a: *mut std::os::raw::c_char = std::ptr::null_mut();
+    let mut b: *mut std::os::raw::c_char = std::ptr::null_mut();
+    let mut c: *mut std::os::raw::c_char = std::ptr::null_mut();
+    let status = unsafe {
+        sv_contact_card_parse(bogus.as_ptr(), side.as_mut_ptr(), &mut a, &mut b, &mut c)
+    };
+    assert_ne!(status, SvStatus::Ok);
+    assert!(a.is_null());
+    assert!(b.is_null());
+    assert!(c.is_null());
+}
+
+#[test]
 fn last_error_message_round_trip() {
     // Trigger an error.
     let bogus = cstr("sv1ABCdef");

@@ -13,6 +13,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use sidevers_core::Envelope;
 use sidevers_core::keys::{PUBLIC_KEY_LEN, SideKey};
 use sidevers_core::verse::{ContractObject, VerseContentKey};
 use tokio::sync::Mutex;
@@ -42,6 +43,13 @@ pub(crate) struct VerseHostInner {
     /// Live gossip-style map of (member side) → QUIC connection. Used to
     /// fan out posts and to push rotated content keys.
     pub active_sessions: HashMap<[u8; PUBLIC_KEY_LEN], quinn::Connection>,
+    /// Audit P1.D — pending key-rotation pushes that failed delivery
+    /// (member offline, transient stream error). On the next inbound
+    /// contact from the member, the host re-pushes the stashed envelope
+    /// so the member doesn't silently miss the rotated content key.
+    /// Map is keyed by member side pubkey; the value is the latest
+    /// `JoinAccept`-shaped envelope carrying the sealed rotated key.
+    pub pending_key_pushes: HashMap<[u8; PUBLIC_KEY_LEN], Envelope>,
 }
 
 impl VerseHost {
@@ -54,9 +62,31 @@ impl VerseHost {
                 members: HashSet::new(),
                 consented_versions: HashMap::new(),
                 active_sessions: HashMap::new(),
+                pending_key_pushes: HashMap::new(),
             })),
             posts: VersePostStore::new(),
         }
+    }
+
+    /// Audit P1.D — stash a key-rotation envelope that failed to deliver.
+    /// Replaces any earlier pending push for the same member, so members
+    /// always get the latest sealed key on reconnect (not a stale one).
+    pub async fn stash_pending_key_push(&self, member: [u8; PUBLIC_KEY_LEN], env: Envelope) {
+        let mut g = self.inner.lock().await;
+        g.pending_key_pushes.insert(member, env);
+    }
+
+    /// Audit P1.D — take any pending key-rotation envelope for a member.
+    /// Called when a member reconnects so we can deliver the stashed
+    /// push on the new connection. Idempotent: returns `None` if there
+    /// is nothing pending.
+    pub async fn take_pending_key_push(&self, member: &[u8; PUBLIC_KEY_LEN]) -> Option<Envelope> {
+        self.inner.lock().await.pending_key_pushes.remove(member)
+    }
+
+    /// Test / diagnostic helper: count pending pushes.
+    pub async fn pending_key_push_count(&self) -> usize {
+        self.inner.lock().await.pending_key_pushes.len()
     }
 
     /// Handle to the per-verse post store (Phase 1.5.D).
@@ -142,5 +172,101 @@ impl VerseHost {
     pub async fn amend_contract(&self, new_contract: ContractObject) {
         let mut guard = self.inner.lock().await;
         guard.contract = new_contract;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sidevers_core::MessageType;
+    use sidevers_core::envelope::{now_unix_seconds, random_nonce};
+    use sidevers_core::keys::MasterKey;
+    use sidevers_core::verse::ContractObject;
+
+    fn fresh_host() -> VerseHost {
+        let master = MasterKey::generate().unwrap();
+        let verse_key = master.derive_side(&"test-verse".into()).unwrap();
+        let contract = ContractObject::sign(
+            &verse_key,
+            1,
+            "test",
+            "",
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            now_unix_seconds().unwrap(),
+        )
+        .unwrap();
+        let content_key = VerseContentKey::generate().unwrap();
+        VerseHost::new(verse_key, contract, content_key)
+    }
+
+    fn dummy_envelope() -> Envelope {
+        let m = MasterKey::generate().unwrap();
+        let s = m.derive_side(&"signer".into()).unwrap();
+        Envelope::sign_with(
+            MessageType::JOIN_ACCEPT,
+            &s,
+            None,
+            b"stashed-payload".to_vec(),
+            now_unix_seconds().unwrap(),
+            random_nonce().unwrap(),
+        )
+        .unwrap()
+    }
+
+    // Audit P1.D — stash + take round-trip.
+    #[tokio::test]
+    async fn pending_key_push_round_trip() {
+        let host = fresh_host();
+        let member = [0xAAu8; 32];
+        assert_eq!(host.pending_key_push_count().await, 0);
+
+        let env = dummy_envelope();
+        host.stash_pending_key_push(member, env.clone()).await;
+        assert_eq!(host.pending_key_push_count().await, 1);
+
+        let taken = host.take_pending_key_push(&member).await.unwrap();
+        assert_eq!(taken.nonce, env.nonce);
+        // Pending count drops back to zero after take.
+        assert_eq!(host.pending_key_push_count().await, 0);
+        // Second take is None.
+        assert!(host.take_pending_key_push(&member).await.is_none());
+    }
+
+    // Audit P1.D — a later stash overwrites earlier; members get the
+    // latest rotated key on reconnect, not a stale one.
+    #[tokio::test]
+    async fn later_stash_supersedes_earlier() {
+        let host = fresh_host();
+        let member = [0xBBu8; 32];
+        let env_old = dummy_envelope();
+        let env_new = dummy_envelope();
+        assert_ne!(env_old.nonce, env_new.nonce);
+
+        host.stash_pending_key_push(member, env_old).await;
+        host.stash_pending_key_push(member, env_new.clone()).await;
+        // Only one entry; it's the newer one.
+        assert_eq!(host.pending_key_push_count().await, 1);
+        let taken = host.take_pending_key_push(&member).await.unwrap();
+        assert_eq!(taken.nonce, env_new.nonce);
+    }
+
+    // Audit P1.D — multiple members each get their own stash slot.
+    #[tokio::test]
+    async fn distinct_members_have_separate_stashes() {
+        let host = fresh_host();
+        let m1 = [0x11u8; 32];
+        let m2 = [0x22u8; 32];
+        host.stash_pending_key_push(m1, dummy_envelope()).await;
+        host.stash_pending_key_push(m2, dummy_envelope()).await;
+        assert_eq!(host.pending_key_push_count().await, 2);
+        assert!(host.take_pending_key_push(&m1).await.is_some());
+        assert_eq!(host.pending_key_push_count().await, 1);
+        assert!(host.take_pending_key_push(&m2).await.is_some());
+        assert_eq!(host.pending_key_push_count().await, 0);
     }
 }

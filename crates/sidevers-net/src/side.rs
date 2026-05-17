@@ -76,11 +76,21 @@ pub struct CoHolderRecord {
 }
 
 /// In-progress pairing record kept on the existing device until the new
-/// device sends a matching `PairingRequest` (Track C). 10-minute TTL.
+/// device sends a matching `PairingRequest` (Track C).
+///
+/// TTL was 600s in earlier phases; tightened to `PAIRING_TTL_SECS` (90s)
+/// per Audit P1.4 — pairing is an interactive flow, 10 minutes is long
+/// enough for an observer to grab the QR before the legitimate user
+/// completes the scan. 90s preserves UX margin while shrinking the
+/// active-attack window by ~7×.
 #[derive(Debug, Clone)]
 pub struct PendingPairing {
     pub issued_at: u64,
 }
+
+/// Maximum age (seconds) of a pending pairing nonce before the existing
+/// device will refuse the resulting `PairingRequest`. Tightened from 600s.
+pub const PAIRING_TTL_SECS: u64 = 90;
 
 impl Side {
     /// Load existing state for `side_key.public_bytes()` from `store`, or
@@ -447,8 +457,8 @@ impl Side {
     pub async fn take_pending_pairing(&self, nonce: &[u8; 16]) -> Option<PendingPairing> {
         let now = now_or_log_zero();
         let mut g = self.pending_pairings.lock().await;
-        // Sweep stale entries (>600s) opportunistically.
-        g.retain(|_, p| now.saturating_sub(p.issued_at) < 600);
+        // Sweep stale entries opportunistically (Audit P1.4 — tightened TTL).
+        g.retain(|_, p| now.saturating_sub(p.issued_at) < PAIRING_TTL_SECS);
         g.remove(nonce)
     }
 

@@ -1,12 +1,11 @@
 //! Bech32m address codec across the FFI.
 
-use std::ffi::CStr;
 use std::os::raw::c_char;
 
 use sidevers_core::{Address, AddressKind};
 
-use crate::error::{SvStatus, set_last_error, status_from};
-use crate::mem::string_to_ffi;
+use crate::error::{SvStatus, ffi_entry, set_last_error, status_from};
+use crate::mem::{cstr_with_cap, string_to_ffi};
 
 /// Address kind tag for [`sv_address_encode`] / [`sv_address_decode`].
 #[repr(u8)]
@@ -43,16 +42,26 @@ pub unsafe extern "C" fn sv_address_encode(
     pubkey_32: *const u8,
     kind: SvAddressKind,
 ) -> *mut c_char {
-    if pubkey_32.is_null() {
-        set_last_error("sv_address_encode: pubkey_32 is null");
-        return std::ptr::null_mut();
+    // Audit P1.B — wrap the FFI boundary in catch_unwind. Returns null on
+    // panic so the C caller sees the failure instead of a UB unwind.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if pubkey_32.is_null() {
+            set_last_error("sv_address_encode: pubkey_32 is null");
+            return std::ptr::null_mut();
+        }
+        // SAFETY: caller contract.
+        let pk = unsafe { std::slice::from_raw_parts(pubkey_32, 32) };
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(pk);
+        let addr = Address::new(kind.to_core(), arr);
+        string_to_ffi(addr.encode())
+    })) {
+        Ok(p) => p,
+        Err(_) => {
+            set_last_error("sv_address_encode: panicked at FFI boundary");
+            std::ptr::null_mut()
+        }
     }
-    // SAFETY: caller contract.
-    let pk = unsafe { std::slice::from_raw_parts(pubkey_32, 32) };
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(pk);
-    let addr = Address::new(kind.to_core(), arr);
-    string_to_ffi(addr.encode())
 }
 
 /// Parse a bech32m address into its 32-byte public key + kind.
@@ -66,26 +75,35 @@ pub unsafe extern "C" fn sv_address_decode(
     out_pubkey_32: *mut u8,
     out_kind: *mut SvAddressKind,
 ) -> SvStatus {
-    if addr.is_null() || out_pubkey_32.is_null() || out_kind.is_null() {
-        set_last_error("sv_address_decode: null pointer argument");
-        return SvStatus::NullPtr;
-    }
-    // SAFETY: caller contract.
-    let s = match unsafe { CStr::from_ptr(addr) }.to_str() {
-        Ok(s) => s,
-        Err(_) => {
-            set_last_error("sv_address_decode: address is not valid UTF-8");
-            return SvStatus::InvalidInput;
+    ffi_entry("sv_address_decode", || {
+        if addr.is_null() || out_pubkey_32.is_null() || out_kind.is_null() {
+            set_last_error("sv_address_decode: null pointer argument");
+            return SvStatus::NullPtr;
         }
-    };
-    let (status, parsed) = status_from(Address::parse(s));
-    if let Some(p) = parsed {
-        let bytes = p.key_bytes();
-        // SAFETY: caller contract.
-        unsafe {
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_pubkey_32, 32);
-            std::ptr::write(out_kind, SvAddressKind::from_core(p.kind()));
+        // SAFETY: caller contract. Length-capped scan (Audit P2.E).
+        let addr_bytes = match unsafe { cstr_with_cap(addr) } {
+            Some(b) => b,
+            None => {
+                set_last_error("sv_address_decode: address not NUL-terminated within length cap");
+                return SvStatus::InvalidInput;
+            }
+        };
+        let s = match std::str::from_utf8(addr_bytes) {
+            Ok(s) => s,
+            Err(_) => {
+                set_last_error("sv_address_decode: address is not valid UTF-8");
+                return SvStatus::InvalidInput;
+            }
+        };
+        let (status, parsed) = status_from(Address::parse(s));
+        if let Some(p) = parsed {
+            let bytes = p.key_bytes();
+            // SAFETY: caller contract.
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_pubkey_32, 32);
+                std::ptr::write(out_kind, SvAddressKind::from_core(p.kind()));
+            }
         }
-    }
-    status
+        status
+    })
 }

@@ -1654,6 +1654,7 @@ dependencies = [
  "cbindgen",
  "hex",
  "sidevers-core",
+ "zeroize",
 ]
 
 [[package]]
@@ -1709,6 +1710,7 @@ dependencies = [
  "hex",
  "rusqlite",
  "sidevers-core",
+ "subtle",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

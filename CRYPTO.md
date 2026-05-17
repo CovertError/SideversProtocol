@@ -12,9 +12,14 @@ should be answerable from the codebase as it stands.
 **Status:** Phase 1 + 1.5a/b/c (verse surface) + 1.5d (profile / capability /
 retirement) + 1.5e (relationships / lifecycle / jitter) + 1.5f (multi-side
 hosting / SQLite persistence / multi-device QR pairing) + 1.5g (live state
-delta sync between co-holders) complete; **207 tests green** (incl. 9 FFI
-integration); cross-platform validated for macOS / Linux / Windows /
-iOS / Android.
+delta sync between co-holders) + 1.5h (May 2026 pre-audit hardening) +
+**1.5i (May 2026 round-2 fresh-eyes audit: FFI zeroize + catch_unwind +
+length cap, SAS wordlist compile-time validation, safe_backup_path
+canonicalize + Windows-reserved + NFC + bidi, constant-time hash compare,
+IpSybilTracker infra, verse key-rotation idempotent retry)** complete;
+**362 tests green** across the workspace + Tauri desktop. Cross-platform
+validated for macOS / Linux / Windows / iOS / Android. See
+[SECURITY_CHANGELOG.md](SECURITY_CHANGELOG.md) for the audit-driven changes.
 
 ---
 
@@ -356,16 +361,27 @@ or genuine gaps to flag.
 12. **Side seed stored in cleartext in SQLite.** The `sides.seed` column
     in `<data_dir>/sides.db` holds the 32-byte side secret in the clear.
     Loss of the DB file = loss of all side identities + ability to
-    impersonate any hosted side. Mitigations: **Phase 1.H1 audit-pass
-    added `fs_perms.rs`** which chmods the file to 0o600 + the data
-    dir to 0o700 on every store open (Unix only; no-op on Windows).
-    Other local users on the same Unix box can no longer read the
-    seed. The deployer is still expected to keep the data_dir under
-    OS-level disk encryption (FileVault on macOS, LUKS on Linux,
-    BitLocker on Windows, and the iOS/Android app-private-data sandbox
-    on mobile). Application-level encryption via OS keychain-derived
-    KEK is a Phase 2 hardening when the distribution model warrants
-    it.
+    impersonate any hosted side. Mitigations:
+    - **Phase 1.H1 audit-pass added `fs_perms.rs`** which chmods the
+      file to 0o600 + the data dir to 0o700 on every store open (Unix
+      only; no-op on Windows). Other local users on the same Unix box
+      can no longer read the seed.
+    - **Phase 1.5h (May 2026) added `sidevers_core::keystore`**, a
+      passphrase-sealed seed format (Argon2id KDF +
+      ChaCha20-Poly1305 AEAD with format params bound in AAD). The
+      Tauri client's "back up seed" flow now writes only the sealed
+      form; `sidevers-node` accepts both legacy plaintext seeds (with
+      a stderr warning) and sealed seeds (passphrase via
+      `SIDEVERS_SEED_PASSPHRASE`). See [SECURITY_CHANGELOG.md](SECURITY_CHANGELOG.md)
+      P1.1 + P1.2.
+    - **Still cleartext at rest:** the *running* `<data_dir>/sides.db`
+      itself is not yet encrypted. Encrypting the SQLite store (via
+      SQLCipher or app-level page encryption keyed from the master
+      seed) is the next step — see SECURITY_CHANGELOG.md "Deferred."
+    - The deployer is still expected to keep the data_dir under
+      OS-level disk encryption (FileVault on macOS, LUKS on Linux,
+      BitLocker on Windows, iOS/Android app-private-data sandbox on
+      mobile).
 
 13. **Multi-device network-level revocation is local-only.** When a
     co-holder publishes `DeviceRevoke` (0x28), other co-holders mark the

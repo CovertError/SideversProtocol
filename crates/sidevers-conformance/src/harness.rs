@@ -318,14 +318,8 @@ mod tests {
         let alice_side = alice.node.side();
         let nonce: [u8; NONCE_LEN] = random_nonce().unwrap();
         let plaintext: &[u8] = b"replay-target";
-        let ciphertext = core_payload::seal(
-            plaintext,
-            alice_side,
-            &session.peer_side,
-            &nonce,
-            b"",
-        )
-        .unwrap();
+        let ciphertext =
+            core_payload::seal(plaintext, alice_side, &session.peer_side, &nonce, b"").unwrap();
         let env = Envelope::sign_with(
             MessageType::DIRECT_MESSAGE,
             alice_side,

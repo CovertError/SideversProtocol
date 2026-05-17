@@ -28,6 +28,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 [dependencies]
 sidevers-core = { workspace = true }
 hex = { workspace = true }
+zeroize = { workspace = true }
 
 [build-dependencies]
 cbindgen = { workspace = true }

@@ -2143,6 +2143,33 @@ async fn serve_verse(session: Session, services: Services) -> Result<()> {
         .map(|h| VerseSessionGuard { host: h, peer_side })
         .collect();
 
+    // Audit P1.D — on reconnect, redeliver any key-rotation envelopes
+    // stashed from a prior failed push. Each host is independent; we
+    // try once and re-stash on failure so the next reconnect tries
+    // again. The stash is keyed by member side, so a later rotation
+    // that supersedes this one will overwrite the entry.
+    for h in hosts.values() {
+        if let Some(env) = h.take_pending_key_push(&peer_side).await {
+            match session.connection.open_bi().await {
+                Ok((mut send, _recv)) => match send_envelope(&mut send, &env).await {
+                    Ok(()) => {
+                        send.finish().ok();
+                        debug!(
+                            member = %LogId::new(&peer_side),
+                            "verse key rotation: redelivered stashed envelope on reconnect"
+                        );
+                    }
+                    Err(_) => {
+                        h.stash_pending_key_push(peer_side, env).await;
+                    }
+                },
+                Err(_) => {
+                    h.stash_pending_key_push(peer_side, env).await;
+                }
+            }
+        }
+    }
+
     loop {
         let (mut send, _recv, env) = match session.accept_one().await {
             Ok(triple) => triple,
@@ -2640,13 +2667,30 @@ async fn rotate_and_push_verse_key(host: &crate::verse::VerseHost) -> Result<()>
         .await?;
 
     for (member, conn, env) in pushes {
+        let host = host.clone();
         tokio::spawn(async move {
-            if let Ok((mut send, _recv)) = conn.open_bi().await {
-                if send_envelope(&mut send, &env).await.is_ok() {
-                    send.finish().ok();
-                }
+            // Audit P1.D — try to deliver; on any failure (member offline,
+            // stream error, transient blip) stash the envelope so the
+            // next inbound contact from `member` re-pushes the rotated
+            // key. Idempotent: storing the same envelope twice is fine,
+            // and the most-recent stash supersedes any earlier one.
+            let delivered = match conn.open_bi().await {
+                Ok((mut send, _recv)) => match send_envelope(&mut send, &env).await {
+                    Ok(()) => {
+                        send.finish().ok();
+                        true
+                    }
+                    Err(_) => false,
+                },
+                Err(_) => false,
+            };
+            if !delivered {
+                debug!(
+                    member = %LogId::new(&member),
+                    "verse key rotation push failed; stashed for redelivery on reconnect"
+                );
+                host.stash_pending_key_push(member, env).await;
             }
-            let _ = member;
         });
     }
     Ok(())
