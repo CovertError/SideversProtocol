@@ -176,8 +176,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: desktop/tauri
-          tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
-          releaseName: 'Sidevers ${{ github.ref_type == 'tag' && github.ref_name || 'manual build' }}'
+          tagName: "${{ github.ref_type == 'tag' && github.ref_name || '' }}"
+          releaseName: "Sidevers ${{ github.ref_type == 'tag' && github.ref_name || 'manual build' }}"
           releaseBody: |
             Desktop, CLI, and node binaries for every supported platform.
             Desktop builds are signed with the protocol's Ed25519 release key;
