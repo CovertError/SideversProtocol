@@ -427,17 +427,18 @@
             <!-- "Add by code" tab -->
             <div class="sv-form-section" data-tab-pane="paste" hidden>
               <p class="sv-form-sub" data-i18n="add_friend.paste_sub">
-                Paste a friend code (starts with <code>sidevers-contact:1:</code>)
-                or scan the friend's QR. We'll save them as a friend on the
-                active side.
+                Paste a friend code (starts with <code>sidevers-contact:1:</code>),
+                a group invite (<code>sidevers-group:1:</code>), or a federated
+                handle like <code>name@sidevers.com</code>. We'll save them as a
+                friend on the active side.
               </p>
               <div class="sv-field">
                 <label class="sv-field-label" data-i18n="add_friend.paste_label">
-                  Friend code
+                  Friend code or handle
                 </label>
                 <textarea id="contact-paste-uri" class="sv-mono" rows="2"
                           data-i18n-placeholder="add_friend.paste_placeholder"
-                          placeholder="sidevers-contact:1:..."></textarea>
+                          placeholder="sidevers-contact:1:… or name@sidevers.com"></textarea>
               </div>
               <button id="contact-paste-accept" data-i18n="btn.accept_code">
                 Add friend

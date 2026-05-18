@@ -171,6 +171,36 @@ function shortenAddr(addr) {
   return `${addr.slice(0, 10)}…${addr.slice(-6)}`;
 }
 
+// Stage E: federated handle parsing — `local@domain` form.
+// Mirrors the (handle_local, domain) pair carried by HandleResolve /
+// HandleAttest in sidevers-core::messages::public. Both parts are
+// validated against the same charset the core types accept; whitespace
+// outside the brackets is tolerated so users can paste freely.
+//
+// Returns `{ local, domain }` on success or `null` if the input is not
+// a handle. Falls through silently so the caller can route the input
+// to other parsers (sidevers-group:, sidevers-contact:, raw bech32).
+const FEDERATED_HANDLE_RE =
+  /^([A-Za-z0-9._-]{1,64})@([A-Za-z0-9.-]{1,253})$/;
+function parseFederatedHandle(input) {
+  if (!input || typeof input !== "string") return null;
+  const trimmed = input.trim();
+  // Cheap reject for the common cases (URIs, bech32, plain text) so
+  // we don't burn the regex engine on obviously-not-a-handle input.
+  if (trimmed.includes(":") || trimmed.includes(" ")) return null;
+  if (!trimmed.includes("@")) return null;
+  const m = FEDERATED_HANDLE_RE.exec(trimmed);
+  if (!m) return null;
+  // The core type also rejects bare-dot edges; mirror the check so
+  // bad input fails locally with a clearer error than the registry.
+  const local = m[1];
+  const domain = m[2];
+  if (local.startsWith(".") || local.endsWith(".")) return null;
+  if (domain.startsWith(".") || domain.endsWith(".")) return null;
+  if (!domain.includes(".")) return null; // bare hostnames not federated
+  return { local, domain };
+}
+
 function avatarInitials(label) {
   if (!label) return "—";
   const trimmed = String(label).trim();
@@ -2071,6 +2101,20 @@ function attachStaticHandlers() {
     safe(async () => {
       const uri = $("contact-paste-uri").value.trim();
       if (!uri) throw new Error("paste a friend code first");
+
+      // Stage E: federated-handle detection. `omar@sidevers.com` form
+      // is recognized so users see the path exists; actual resolution
+      // requires a live registry (HandleResolve / HandleAttest, see
+      // CRYPTO.md §2.11) which arrives with Phase 2. Until then we
+      // surface a clear inline message and leave the textarea filled
+      // so the user can swap in the friend's invite link or bech32
+      // address without re-typing the handle.
+      const handle = parseFederatedHandle(uri);
+      if (handle) {
+        throw new Error(
+          t("err.handle_phase2", { handle: `${handle.local}@${handle.domain}` }),
+        );
+      }
 
       // Stage D L2b: dispatch by URI prefix. Group invites and
       // friend invites share a single paste field but route to

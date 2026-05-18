@@ -41,100 +41,175 @@ use crate::keys::{PUBLIC_KEY_LEN, PublicKey, SIGNATURE_LEN, SideKey};
 // ============================================================================
 // HandleResolvePayload (0x60) — unsigned request
 // ============================================================================
+//
+// Federated form (spec §9.3, Phase 2 — federated namespace decision): a
+// handle is the pair `(handle_local, domain)`, not a single opaque
+// string. The display form is `omar@sidevers.com`; on the wire we
+// carry the two halves separately so a responder can reject anything
+// that isn't its own domain — no registry speaks for handles outside
+// its own namespace.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandleResolvePayload {
-    pub handle: String,
+    /// Local part — the bit before the `@`. Lowercase, identifier-shaped.
+    pub handle_local: String,
+    /// Domain the responder is being asked to resolve under. The
+    /// responder MUST refuse if this doesn't match its served domain.
+    pub domain: String,
 }
 
 impl HandleResolvePayload {
+    /// Convenience for the display form `<local>@<domain>`.
+    pub fn display(&self) -> String {
+        format!("{}@{}", self.handle_local, self.domain)
+    }
+
     pub fn encode(&self) -> Vec<u8> {
-        let entries = [MapEntry {
-            key: cbor::key("handle"),
-            value: cbor::text(&self.handle),
-        }];
+        // Canonical: handle_local(12) > domain(6). Length order:
+        // domain(6) < handle_local(12). Two entries.
+        let entries = [
+            MapEntry {
+                key: cbor::key("domain"),
+                value: cbor::text(&self.domain),
+            },
+            MapEntry {
+                key: cbor::key("handle_local"),
+                value: cbor::text(&self.handle_local),
+            },
+        ];
         cbor::encode_map(&entries)
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         let mut r = CborReader::new(bytes);
         let n = r.read_map_header()?;
-        if n != 1 {
+        if n != 2 {
             return Err(Error::CborDecode(format!(
-                "HandleResolve expected 1 key, got {n}"
+                "HandleResolve expected 2 keys, got {n}"
             )));
         }
-        if r.read_text()? != "handle" {
-            return Err(Error::CborNotCanonical("HandleResolve missing 'handle'"));
+        if r.read_text()? != "domain" {
+            return Err(Error::CborNotCanonical(
+                "HandleResolve: expected 'domain' first",
+            ));
         }
-        let handle = r.read_text()?.to_owned();
+        let domain = r.read_text()?.to_owned();
+        if r.read_text()? != "handle_local" {
+            return Err(Error::CborNotCanonical(
+                "HandleResolve: expected 'handle_local' second",
+            ));
+        }
+        let handle_local = r.read_text()?.to_owned();
         if !r.at_end() {
             return Err(Error::CborDecode(
                 "trailing bytes after HandleResolve".into(),
             ));
         }
-        Ok(Self { handle })
+        Ok(Self {
+            handle_local,
+            domain,
+        })
     }
 }
 
 // ============================================================================
-// HandleAttestPayload (0x61) — signed claim "I am side X, I claim @handle"
+// HandleAttestPayload (0x61) — signed claim
 // ============================================================================
+//
+// "I am side X, I claim handle_local under domain D, issued at T."
+//
+// **The domain is in the signed digest.** A signature over just
+// (side, handle, issued_at) would be replayable across registries:
+// an attacker could lift Alice's attestation for `alice@example.com`
+// and present it under `sidevers.com` as proof of `alice@sidevers.com`.
+// Including `domain` in the signed bytes binds the claim to one
+// namespace. This is the DKIM `d=` selector pattern.
+//
+// Display form: `<handle_local>@<domain>`. Wire form: two strings.
+// `display()` is the convenience helper.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandleAttestPayload {
     pub side: [u8; PUBLIC_KEY_LEN],
-    pub handle: String,
+    pub handle_local: String,
+    pub domain: String,
     pub issued_at: u64,
     pub signature: [u8; SIGNATURE_LEN],
 }
 
 impl HandleAttestPayload {
-    fn encode_unsigned(side: &[u8; PUBLIC_KEY_LEN], handle: &str, issued_at: u64) -> Vec<u8> {
-        // Canonical: side(4) < handle(6) < issued_at(9)
+    /// `<handle_local>@<domain>` — what humans see, never what's signed.
+    pub fn display(&self) -> String {
+        format!("{}@{}", self.handle_local, self.domain)
+    }
+
+    fn encode_unsigned(
+        side: &[u8; PUBLIC_KEY_LEN],
+        handle_local: &str,
+        domain: &str,
+        issued_at: u64,
+    ) -> Vec<u8> {
+        // Canonical key order (raw text length, ties → bytewise on
+        // encoded bytes): side(4) < domain(6) < handle_local(12) <
+        // issued_at(9 = same length as no other length-9 here besides
+        // signature, but signature is in to_wire_bytes only).
+        // Tie at 6: domain ("d") < handle_local ("h") wait — handle_local
+        // is length 12, not 6. So no tie. Order: side, domain,
+        // handle_local, issued_at.
         let entries = [
             MapEntry {
                 key: cbor::key("side"),
                 value: cbor::bytes(side),
             },
             MapEntry {
-                key: cbor::key("handle"),
-                value: cbor::text(handle),
+                key: cbor::key("domain"),
+                value: cbor::text(domain),
             },
             MapEntry {
                 key: cbor::key("issued_at"),
                 value: cbor::uint(issued_at),
             },
+            MapEntry {
+                key: cbor::key("handle_local"),
+                value: cbor::text(handle_local),
+            },
         ];
         cbor::encode_map(&entries)
     }
 
-    pub fn sign(side_key: &SideKey, handle: impl Into<String>, issued_at: u64) -> Result<Self> {
+    pub fn sign(
+        side_key: &SideKey,
+        handle_local: impl Into<String>,
+        domain: impl Into<String>,
+        issued_at: u64,
+    ) -> Result<Self> {
         let pk = side_key.public_bytes();
-        let handle = handle.into();
-        let unsigned = Self::encode_unsigned(&pk, &handle, issued_at);
+        let handle_local = handle_local.into();
+        let domain = domain.into();
+        let unsigned = Self::encode_unsigned(&pk, &handle_local, &domain, issued_at);
         let digest = blake3::hash(&unsigned);
         let signature = side_key.sign(digest.as_bytes());
         Ok(Self {
             side: pk,
-            handle,
+            handle_local,
+            domain,
             issued_at,
             signature,
         })
     }
 
     pub fn to_wire_bytes(&self) -> Vec<u8> {
-        // Canonical with signature: side(4) < handle(6) < issued_at(9) < signature(9).
-        // issued_at and signature are both length 9 — bytewise: 'i' < 's' so
-        // issued_at < signature.
+        // Canonical with signature appended. Lengths: side(4),
+        // domain(6), issued_at(9), signature(9), handle_local(12).
+        // 9-tie: issued_at < signature bytewise ('i' < 's').
         let entries = [
             MapEntry {
                 key: cbor::key("side"),
                 value: cbor::bytes(&self.side),
             },
             MapEntry {
-                key: cbor::key("handle"),
-                value: cbor::text(&self.handle),
+                key: cbor::key("domain"),
+                value: cbor::text(&self.domain),
             },
             MapEntry {
                 key: cbor::key("issued_at"),
@@ -144,6 +219,10 @@ impl HandleAttestPayload {
                 key: cbor::key("signature"),
                 value: cbor::bytes(&self.signature),
             },
+            MapEntry {
+                key: cbor::key("handle_local"),
+                value: cbor::text(&self.handle_local),
+            },
         ];
         cbor::encode_map(&entries)
     }
@@ -151,14 +230,15 @@ impl HandleAttestPayload {
     pub fn from_wire_bytes(bytes: &[u8]) -> Result<Self> {
         let mut r = CborReader::new(bytes);
         let n = r.read_map_header()?;
-        if n != 4 {
+        if n != 5 {
             return Err(Error::CborDecode(format!(
-                "HandleAttest expected 4 keys, got {n}"
+                "HandleAttest expected 5 keys, got {n}"
             )));
         }
-        let expected = ["side", "handle", "issued_at", "signature"];
+        let expected = ["side", "domain", "issued_at", "signature", "handle_local"];
         let mut side: Option<[u8; PUBLIC_KEY_LEN]> = None;
-        let mut handle: Option<String> = None;
+        let mut domain: Option<String> = None;
+        let mut handle_local: Option<String> = None;
         let mut issued_at: Option<u64> = None;
         let mut signature: Option<[u8; SIGNATURE_LEN]> = None;
         for e in expected {
@@ -182,7 +262,8 @@ impl HandleAttestPayload {
                     arr.copy_from_slice(b);
                     side = Some(arr);
                 }
-                "handle" => handle = Some(r.read_text()?.to_owned()),
+                "domain" => domain = Some(r.read_text()?.to_owned()),
+                "handle_local" => handle_local = Some(r.read_text()?.to_owned()),
                 "issued_at" => issued_at = Some(r.read_u64()?),
                 "signature" => {
                     let b = r.read_bytes()?;
@@ -206,17 +287,19 @@ impl HandleAttestPayload {
             ));
         }
         let side = side.ok_or(Error::Invariant("missing side"))?;
-        let handle = handle.ok_or(Error::Invariant("missing handle"))?;
+        let domain = domain.ok_or(Error::Invariant("missing domain"))?;
+        let handle_local = handle_local.ok_or(Error::Invariant("missing handle_local"))?;
         let issued_at = issued_at.ok_or(Error::Invariant("missing issued_at"))?;
         let signature = signature.ok_or(Error::Invariant("missing signature"))?;
 
-        let unsigned = Self::encode_unsigned(&side, &handle, issued_at);
+        let unsigned = Self::encode_unsigned(&side, &handle_local, &domain, issued_at);
         let digest = blake3::hash(&unsigned);
         PublicKey::from_bytes(&side)?.verify(digest.as_bytes(), &signature)?;
 
         let payload = Self {
             side,
-            handle,
+            handle_local,
+            domain,
             issued_at,
             signature,
         };
@@ -783,31 +866,56 @@ mod tests {
     #[test]
     fn handle_resolve_round_trip() {
         let p = HandleResolvePayload {
-            handle: "@omar".to_owned(),
+            handle_local: "omar".to_owned(),
+            domain: "sidevers.com".to_owned(),
         };
         let bytes = p.encode();
         let decoded = HandleResolvePayload::decode(&bytes).unwrap();
         assert_eq!(decoded, p);
+        assert_eq!(decoded.display(), "omar@sidevers.com");
     }
 
     #[test]
     fn handle_attest_signed_round_trip() {
         let side = fixture_side(0x11);
-        let p = HandleAttestPayload::sign(&side, "@omar", 1_700_000_000).unwrap();
+        let p = HandleAttestPayload::sign(&side, "omar", "sidevers.com", 1_700_000_000).unwrap();
         let bytes = p.to_wire_bytes();
         let decoded = HandleAttestPayload::from_wire_bytes(&bytes).unwrap();
         assert_eq!(decoded, p);
         assert_eq!(decoded.side, side.public_bytes());
+        assert_eq!(decoded.display(), "omar@sidevers.com");
     }
 
     #[test]
     fn handle_attest_tamper_breaks_signature() {
         let side = fixture_side(0x22);
-        let mut p = HandleAttestPayload::sign(&side, "@x", 1).unwrap();
-        p.handle = "@y".to_owned();
+        let mut p = HandleAttestPayload::sign(&side, "x", "sidevers.com", 1).unwrap();
+        p.handle_local = "y".to_owned();
         let bytes = p.to_wire_bytes();
         let err = HandleAttestPayload::from_wire_bytes(&bytes).unwrap_err();
         assert!(matches!(err, Error::SignatureInvalid));
+    }
+
+    #[test]
+    fn handle_attest_cross_domain_replay_breaks_signature() {
+        // The whole point of putting `domain` in the signed payload:
+        // an attacker rewriting the domain field MUST be rejected by
+        // signature check. Without `domain` in the signed bytes, the
+        // attacker could lift Alice's attestation for example.com
+        // and re-present it under sidevers.com.
+        let side = fixture_side(0x33);
+        let mut p = HandleAttestPayload::sign(&side, "alice", "example.com", 1).unwrap();
+        // Re-domain — same side, same handle_local, same signature,
+        // different domain. The signature is over the (now-stale)
+        // example.com domain; from_wire_bytes recomputes the digest
+        // with the new domain and rejects.
+        p.domain = "sidevers.com".to_owned();
+        let bytes = p.to_wire_bytes();
+        let err = HandleAttestPayload::from_wire_bytes(&bytes).unwrap_err();
+        assert!(
+            matches!(err, Error::SignatureInvalid),
+            "cross-domain replay must fail signature check, got {err:?}"
+        );
     }
 
     #[test]
@@ -879,11 +987,11 @@ mod tests {
     fn directory_entry_aggregates_attestations() {
         let side_a = fixture_side(0x77);
         let side_b = fixture_side(0x88);
-        let att_a = HandleAttestPayload::sign(&side_a, "@team", 100).unwrap();
-        let att_b = HandleAttestPayload::sign(&side_b, "@team", 200).unwrap();
+        let att_a = HandleAttestPayload::sign(&side_a, "team", "sidevers.com", 100).unwrap();
+        let att_b = HandleAttestPayload::sign(&side_b, "team", "sidevers.com", 200).unwrap();
         let entry = DirectoryEntryPayload {
             side: side_a.public_bytes(),
-            handle: "@team".to_owned(),
+            handle: "team@sidevers.com".to_owned(),
             attestations: vec![att_a.clone(), att_b.clone()],
         };
         let bytes = entry.encode();

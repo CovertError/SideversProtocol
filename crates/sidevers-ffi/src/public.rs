@@ -21,31 +21,45 @@ use crate::mem::cstr_with_cap;
 use crate::mem::string_to_ffi;
 use crate::mem::vec_to_ffi;
 
-/// Verify a `HandleAttestPayload` wire encoding and extract the side public
-/// key, the claimed handle, and the issued-at timestamp.
+/// Verify a `HandleAttestPayload` wire encoding and extract the side
+/// public key, the claimed handle, the registry's domain, and the
+/// issued-at timestamp.
+///
+/// Stage E (federated-handle-namespace migration): the domain is now
+/// a separate signed field. The full display form is
+/// `<handle_local>@<domain>`; callers compose it themselves so they
+/// don't accidentally trust a registry that's serving a domain it
+/// doesn't own.
 ///
 /// Inputs:
 ///   * `wire_ptr`, `wire_len` — the CBOR-encoded HandleAttest bytes.
 ///
 /// Outputs (all required):
 ///   * `out_side_pk_32` — writable 32-byte buffer for the claiming side's pubkey.
-///   * `*out_handle` — heap-allocated NUL-terminated C string with the handle.
-///     Free with [`sv_free_string`](crate::sv_free_string).
+///   * `*out_handle_local` — heap-allocated NUL-terminated C string with
+///     the local part (the bit before the `@`). Free with
+///     [`sv_free_string`](crate::sv_free_string).
+///   * `*out_domain` — heap-allocated NUL-terminated C string with the
+///     issuing registry's domain. Free with
+///     [`sv_free_string`](crate::sv_free_string).
 ///   * `out_issued_at` — writable u64.
 ///
-/// On error, no outputs are modified.
+/// On error, no outputs are modified and any partially allocated
+/// strings are freed before returning.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sv_handle_attest_verify(
     wire_ptr: *const u8,
     wire_len: usize,
     out_side_pk_32: *mut u8,
-    out_handle: *mut *mut c_char,
+    out_handle_local: *mut *mut c_char,
+    out_domain: *mut *mut c_char,
     out_issued_at: *mut u64,
 ) -> SvStatus {
     ffi_entry("sv_handle_attest_verify", || {
         if wire_ptr.is_null()
             || out_side_pk_32.is_null()
-            || out_handle.is_null()
+            || out_handle_local.is_null()
+            || out_domain.is_null()
             || out_issued_at.is_null()
         {
             set_last_error("sv_handle_attest_verify: null pointer argument");
@@ -59,19 +73,28 @@ pub unsafe extern "C" fn sv_handle_attest_verify(
             None => return status,
         };
 
-        // Allocate the handle string up-front so the function is atomic on
-        // success/failure (mirrors the contact.rs precedent).
-        let handle_ptr = string_to_ffi(payload.handle);
+        // Allocate both strings up-front so the function is atomic
+        // on success/failure (mirrors the contact.rs precedent).
+        let handle_ptr = string_to_ffi(payload.handle_local);
         if handle_ptr.is_null() {
-            set_last_error("sv_handle_attest_verify: handle contained interior NUL");
+            set_last_error("sv_handle_attest_verify: handle_local contained interior NUL");
+            return SvStatus::Decode;
+        }
+        let domain_ptr = string_to_ffi(payload.domain);
+        if domain_ptr.is_null() {
+            // Free the already-allocated handle to keep the contract
+            // "no partial output on failure."
+            unsafe { drop(std::ffi::CString::from_raw(handle_ptr)) };
+            set_last_error("sv_handle_attest_verify: domain contained interior NUL");
             return SvStatus::Decode;
         }
 
         // SAFETY: caller contract — all output pointers are writable; side
-        // pubkey is 32 bytes; string pointer is valid until freed.
+        // pubkey is 32 bytes; string pointers are valid until freed.
         unsafe {
             std::ptr::copy_nonoverlapping(payload.side.as_ptr(), out_side_pk_32, PUBLIC_KEY_LEN);
-            std::ptr::write(out_handle, handle_ptr);
+            std::ptr::write(out_handle_local, handle_ptr);
+            std::ptr::write(out_domain, domain_ptr);
             std::ptr::write(out_issued_at, payload.issued_at);
         }
         SvStatus::Ok
@@ -338,8 +361,11 @@ pub unsafe extern "C" fn sv_directory_entry_encode(
 
         // Sanity-check the parts match what the caller claimed — defends
         // against the caller accidentally pairing a handle with the wrong
-        // attestation row.
-        if attest.side != side || attest.handle != handle_str {
+        // attestation row. The caller's `handle_str` is in display form
+        // (`<local>@<domain>`); the attestation carries the two halves
+        // separately, so we reconstruct + compare.
+        let attest_display = format!("{}@{}", attest.handle_local, attest.domain);
+        if attest.side != side || attest_display != handle_str {
             set_last_error(
                 "sv_directory_entry_encode: attestation does not match (side, handle) args",
             );
@@ -378,11 +404,13 @@ mod tests {
     #[test]
     fn handle_attest_verify_round_trips() {
         let side = fresh_side("test");
-        let payload = HandleAttestPayload::sign(&side, "omar", 1_700_000_000).unwrap();
+        let payload =
+            HandleAttestPayload::sign(&side, "omar", "sidevers.com", 1_700_000_000).unwrap();
         let wire = payload.to_wire_bytes();
 
         let mut out_pk = [0u8; PUBLIC_KEY_LEN];
         let mut out_handle: *mut c_char = std::ptr::null_mut();
+        let mut out_domain: *mut c_char = std::ptr::null_mut();
         let mut out_issued_at: u64 = 0;
         let status = unsafe {
             sv_handle_attest_verify(
@@ -390,6 +418,7 @@ mod tests {
                 wire.len(),
                 out_pk.as_mut_ptr(),
                 &mut out_handle,
+                &mut out_domain,
                 &mut out_issued_at,
             )
         };
@@ -399,22 +428,29 @@ mod tests {
         let handle = unsafe { std::ffi::CStr::from_ptr(out_handle) }
             .to_str()
             .unwrap();
+        let domain = unsafe { std::ffi::CStr::from_ptr(out_domain) }
+            .to_str()
+            .unwrap();
         assert_eq!(handle, "omar");
+        assert_eq!(domain, "sidevers.com");
         unsafe {
             drop(std::ffi::CString::from_raw(out_handle));
+            drop(std::ffi::CString::from_raw(out_domain));
         }
     }
 
     #[test]
     fn handle_attest_verify_rejects_tampered_wire() {
         let side = fresh_side("test");
-        let payload = HandleAttestPayload::sign(&side, "omar", 1_700_000_000).unwrap();
+        let payload =
+            HandleAttestPayload::sign(&side, "omar", "sidevers.com", 1_700_000_000).unwrap();
         let mut wire = payload.to_wire_bytes();
         let last = wire.len() - 1;
         wire[last] ^= 0x01;
 
         let mut out_pk = [0u8; PUBLIC_KEY_LEN];
         let mut out_handle: *mut c_char = std::ptr::null_mut();
+        let mut out_domain: *mut c_char = std::ptr::null_mut();
         let mut out_issued_at: u64 = 0;
         let status = unsafe {
             sv_handle_attest_verify(
@@ -422,11 +458,13 @@ mod tests {
                 wire.len(),
                 out_pk.as_mut_ptr(),
                 &mut out_handle,
+                &mut out_domain,
                 &mut out_issued_at,
             )
         };
         assert_ne!(status, SvStatus::Ok);
         assert!(out_handle.is_null());
+        assert!(out_domain.is_null());
     }
 
     #[test]
@@ -523,10 +561,11 @@ mod tests {
         use std::ffi::CString;
 
         let side = fresh_side("test");
-        let attest = HandleAttestPayload::sign(&side, "omar", 1_700_000_000).unwrap();
+        let attest =
+            HandleAttestPayload::sign(&side, "omar", "sidevers.com", 1_700_000_000).unwrap();
         let attest_wire = attest.to_wire_bytes();
         let pk = side.public_bytes();
-        let handle = CString::new("omar").unwrap();
+        let handle = CString::new("omar@sidevers.com").unwrap();
 
         let mut out_wire: *mut u8 = std::ptr::null_mut();
         let mut out_len: usize = 0;
@@ -545,7 +584,7 @@ mod tests {
 
         let entry = DirectoryEntryPayload::decode(&bytes).unwrap();
         assert_eq!(entry.side, pk);
-        assert_eq!(entry.handle, "omar");
+        assert_eq!(entry.handle, "omar@sidevers.com");
         assert_eq!(entry.attestations.len(), 1);
 
         unsafe {
@@ -582,10 +621,11 @@ mod tests {
         use std::ffi::CString;
 
         let side = fresh_side("test");
-        let attest = HandleAttestPayload::sign(&side, "omar", 1_700_000_000).unwrap();
+        let attest =
+            HandleAttestPayload::sign(&side, "omar", "sidevers.com", 1_700_000_000).unwrap();
         let attest_wire = attest.to_wire_bytes();
         let pk = side.public_bytes();
-        let handle = CString::new("not-omar").unwrap();
+        let handle = CString::new("not-omar@sidevers.com").unwrap();
 
         let mut out_wire: *mut u8 = std::ptr::null_mut();
         let mut out_len: usize = 0;

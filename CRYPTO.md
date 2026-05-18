@@ -187,19 +187,38 @@ dereference describing the caller contract.
 
 | Operation | Source | Notes |
 |-----------|--------|-------|
-| `HandleResolve` (0x60) | `crates/sidevers-core/src/messages/public.rs` | unsigned request payload |
-| `HandleAttest` (0x61) | same | signed: side claims a handle |
+| `HandleResolve` (0x60) | `crates/sidevers-core/src/messages/public.rs` | unsigned request payload; carries `(handle_local, domain)` per Stage E federated form |
+| `HandleAttest` (0x61) | same | signed: side claims `handle_local` under `domain`; **domain is in the signed digest** so attestations can't be replayed across registries |
 | `PagePublish` (0x62) | same | signed: 6-field signed page (slug, mime, content, published_at) |
 | `PageFetch` (0x63) | same | unsigned request |
 | `PageDeliver` (0x64) | same | wraps a signed `PagePublish` as opaque bstr |
 | `Announcement` (0x65) | same | signed: gossip-fanout broadcast |
-| `DirectoryEntry` (0x66) | same | composite: aggregates per-side `HandleAttest`s |
+| `DirectoryEntry` (0x66) | same | composite: aggregates per-side `HandleAttest`s; the entry's `handle` is in display form `<local>@<domain>` while the embedded attestations carry the two halves separately |
 
 The Rust node **ships these codecs but no `serve_public` handler**. The
 Phase 2 spec is deliberately Laravel-side (the sidevers.com registry
 crate is a separate repo). The codecs let a client sign + dispatch
 public-layer envelopes over an existing Direct or Gossip intent
 session; the registry's dispatch semantics are out of scope here.
+
+**Federated handle namespace (Stage E, decided pre–Phase 2).** A
+handle is the pair `(handle_local, domain)`, written
+`omar@sidevers.com` for humans and carried as two fields on the
+wire. Each registry serves exactly one domain and MUST refuse
+`HandleResolve` requests whose `domain` field isn't its own. The
+`HandleAttest` signature covers `(side, domain, handle_local,
+issued_at)` — including `domain` in the signed bytes is what
+makes the namespace genuinely federated: an attestation issued
+under `example.com` cannot be lifted and re-presented under
+`sidevers.com`, because the verifier recomputes the digest with the
+new domain and the signature breaks. This mirrors DKIM's `d=`
+selector. Migration between registries is the same shape as side
+key rotation (§2.8): publish a new attestation under the new
+domain; the old attestation under the old domain stays valid for
+its lifetime as a forwarding pointer. Multiple registries are the
+default, not an edge case — `sidevers.com` is one reference
+implementation; anyone running a node may run their own (spec §9.7,
+§10.3).
 
 ### 2.12 Operational layers (Phase 1 H1–H4, B1)
 

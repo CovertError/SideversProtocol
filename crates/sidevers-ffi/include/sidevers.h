@@ -302,24 +302,37 @@ void sv_free_buffer(uint8_t *ptr, uintptr_t len);
 void sv_free_string(char *ptr);
 
 /**
- * Verify a `HandleAttestPayload` wire encoding and extract the side public
- * key, the claimed handle, and the issued-at timestamp.
+ * Verify a `HandleAttestPayload` wire encoding and extract the side
+ * public key, the claimed handle, the registry's domain, and the
+ * issued-at timestamp.
+ *
+ * Stage E (federated-handle-namespace migration): the domain is now
+ * a separate signed field. The full display form is
+ * `<handle_local>@<domain>`; callers compose it themselves so they
+ * don't accidentally trust a registry that's serving a domain it
+ * doesn't own.
  *
  * Inputs:
  *   * `wire_ptr`, `wire_len` — the CBOR-encoded HandleAttest bytes.
  *
  * Outputs (all required):
  *   * `out_side_pk_32` — writable 32-byte buffer for the claiming side's pubkey.
- *   * `*out_handle` — heap-allocated NUL-terminated C string with the handle.
- *     Free with [`sv_free_string`](crate::sv_free_string).
+ *   * `*out_handle_local` — heap-allocated NUL-terminated C string with
+ *     the local part (the bit before the `@`). Free with
+ *     [`sv_free_string`](crate::sv_free_string).
+ *   * `*out_domain` — heap-allocated NUL-terminated C string with the
+ *     issuing registry's domain. Free with
+ *     [`sv_free_string`](crate::sv_free_string).
  *   * `out_issued_at` — writable u64.
  *
- * On error, no outputs are modified.
+ * On error, no outputs are modified and any partially allocated
+ * strings are freed before returning.
  */
 SvStatus sv_handle_attest_verify(const uint8_t *wire_ptr,
                                  uintptr_t wire_len,
                                  uint8_t *out_side_pk_32,
-                                 char **out_handle,
+                                 char **out_handle_local,
+                                 char **out_domain,
                                  uint64_t *out_issued_at);
 
 /**
