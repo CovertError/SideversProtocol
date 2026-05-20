@@ -2073,6 +2073,7 @@ dependencies = [
  "clap",
  "hex",
  "self_update",
+ "semver",
  "sidevers-core",
  "sidevers-net",
  "sidevers-storage",

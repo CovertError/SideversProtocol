@@ -165,15 +165,33 @@ jobs:
           workspaces: desktop/tauri
 
       # tauri-action: builds the GUI, signs the bundles with the Ed25519
-      # signing key, generates latest.json, and attaches everything to a
-      # draft GitHub Release on tag push. Reads the keypair from these
-      # secrets — see docs/RELEASING.md for the one-time setup.
+      # updater key, generates latest.json, and attaches everything to
+      # a draft GitHub Release on tag push.
+      #
+      # On macOS, the APPLE_* env vars below are also picked up by the
+      # bundler — when all six are present, tauri-action runs codesign
+      # against the imported Developer ID cert, submits the result to
+      # Apple's notary service, and staples the ticket. End-users see
+      # no Gatekeeper warning.
+      #
+      # The TAURI_SIGNING_* pair is the protocol's own updater-integrity
+      # signing key (Ed25519, independent of Apple). See
+      # docs/RELEASING.md for the one-time setup of both.
       - name: Build + sign desktop GUI
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # macOS Developer ID code signing + notarization. These are
+          # ignored on non-macOS runners. Set all six in GitHub secrets
+          # before the first signed macOS release.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           projectPath: desktop/tauri
           tagName: "${{ github.ref_type == 'tag' && github.ref_name || '' }}"

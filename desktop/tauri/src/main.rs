@@ -2650,6 +2650,14 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            // Anonymous adoption ping — fires once per desktop launch,
+            // independent of whether the user starts a node. See
+            // TELEMETRY.md at the repo root for what is and isn't sent.
+            tauri::async_runtime::spawn(async move {
+                sidevers_net::telemetry::init();
+                sidevers_net::telemetry::fire("app_started");
+            });
+
             // Background update check on launch. Fires once 5s after the
             // window appears, emits `updater:available` with the version +
             // notes if a newer signed build is on GitHub. Frontend listens

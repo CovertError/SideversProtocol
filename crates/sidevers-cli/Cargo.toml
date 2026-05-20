@@ -32,3 +32,8 @@ self_update = { version = "0.41", default-features = false, features = [
     "compression-flate2",
     "rustls",
 ] }
+# Used by `sidevers self-update --check` to compare CARGO_PKG_VERSION
+# against the latest GitHub Release version with real semver semantics
+# (so a local dev build ahead of the published release isn't reported
+# as "update available").
+semver = "1"

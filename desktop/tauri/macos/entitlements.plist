@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-runtime entitlements for the Sidevers desktop client.
+
+  Required for Apple notarization: every Developer ID-signed binary
+  distributed outside the App Store must opt into the hardened
+  runtime, and a notarized app needs an entitlements file even if
+  the file enables nothing exotic.
+
+  We are NOT App-Store sandboxed (no `com.apple.security.app-sandbox`
+  key) — Developer ID distribution doesn't require it, and Sidevers
+  needs unrestricted outbound + inbound UDP for QUIC (`quinn`) peer
+  traffic, plus filesystem access to the chosen data directory.
+  Sandboxing those would force us into App Sandbox containers, which
+  is a much bigger rework than this app needs.
+
+  Each entitlement below is a hardened-runtime exception, not an
+  expansion of capabilities. They permit the things modern WebKit
+  needs inside the Tauri WKWebView host.
+-->
+<plist version="1.0">
+<dict>
+    <!-- WebKit JIT for the JS engine inside the Tauri WKWebView. -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+
+    <!-- Some Tauri/WebKit paths map RWX memory pages outside the JIT
+         region; hardened runtime blocks that by default. -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!-- Permits DYLD_* env vars at launch — useful for tooling and for
+         the Tauri dev runtime; harmless in release. -->
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+
+    <!-- Lets the bundled webview load its own (Apple-signed) frameworks
+         without forcing every dependency to share our Team ID. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>

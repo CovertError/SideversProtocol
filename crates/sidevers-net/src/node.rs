@@ -180,6 +180,11 @@ impl Node {
     /// Start a node bound at `listen_addr`. Returns once the QUIC endpoint
     /// is listening and the accept loop is spawned.
     pub async fn start(side: SideKey, listen_addr: SocketAddr, data_dir: &Path) -> Result<Self> {
+        // Anonymous adoption telemetry — see crates/sidevers-net/src/telemetry.rs
+        // and TELEMETRY.md at the repo root. No-op in debug builds.
+        crate::telemetry::init();
+        crate::telemetry::fire("app_started");
+
         let endpoint = build_server_endpoint(listen_addr)?;
         let local = endpoint.local_addr()?;
         let store = ObjectStore::open(data_dir).await?;
@@ -830,7 +835,12 @@ impl Node {
     pub async fn host_verse(&self, verse: VerseHost) {
         let addr = verse.with(|inner| inner.verse_key.public_bytes()).await;
         let mut g = self.services.hosted_verses.lock().await;
+        let is_new = !g.contains_key(&addr);
         g.insert(addr, verse);
+        drop(g);
+        if is_new {
+            crate::telemetry::fire("verse_created");
+        }
     }
 
     /// Snapshot the verse addresses this node currently hosts.

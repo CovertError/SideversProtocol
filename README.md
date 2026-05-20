@@ -243,6 +243,19 @@ For the mobile C ABI surface, see
 | **3** — Clients | 🟡 in progress | Tauri desktop done (multi-side, pairing, inbox, lifecycle, i18n, onboarding wizard). CLI done. Mobile FFI ready; Flutter client not yet built. |
 | **4+** — Mobile clients, code signing, distribution | future | Outside this repo |
 
+## Telemetry
+
+The reference node and desktop client emit **three anonymous adoption
+events** (`app_started`, `side_created`, `verse_created`) to a Sidevers-
+operated endpoint so we know whether anyone is actually using this.
+Each event is a single HTTP POST containing only the event name, the
+build version, and the release channel — no install ID, no side
+address, no IP retention, no opt-out (because there is nothing
+identifying to opt out of).
+
+The full data policy and the test that pins the wire format are in
+[TELEMETRY.md](TELEMETRY.md).
+
 ## License
 
 - Source code: PolyForm Noncommercial 1.0.0 — see [LICENSE-CODE](LICENSE-CODE).

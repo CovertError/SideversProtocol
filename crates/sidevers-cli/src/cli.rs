@@ -314,6 +314,44 @@ pub async fn run() -> Result<()> {
 const SELF_UPDATE_REPO_OWNER: &str = "CovertError";
 const SELF_UPDATE_REPO_NAME: &str = "SideversProtocol";
 
+/// Where the locally-installed version sits relative to the latest
+/// release on GitHub. `--check` reports the relation; the apply path
+/// refuses to downgrade unless an explicit `--version` is passed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VersionRelation {
+    /// Local == latest. Nothing to do.
+    Same,
+    /// Local > latest (dev build, pre-release, manual install). Don't
+    /// silently downgrade.
+    Ahead,
+    /// Local < latest. The user should upgrade.
+    Behind,
+}
+
+/// Compare a local CARGO_PKG_VERSION against a GitHub release's
+/// `version` tag using real semver semantics. Falls back to string
+/// equality if either side is not a valid semver (which shouldn't
+/// happen for our own releases, but stays defensive).
+fn self_update_compare(local: &str, remote: &str) -> VersionRelation {
+    match (
+        semver::Version::parse(local.trim_start_matches('v')),
+        semver::Version::parse(remote.trim_start_matches('v')),
+    ) {
+        (Ok(l), Ok(r)) => match l.cmp(&r) {
+            std::cmp::Ordering::Less => VersionRelation::Behind,
+            std::cmp::Ordering::Equal => VersionRelation::Same,
+            std::cmp::Ordering::Greater => VersionRelation::Ahead,
+        },
+        _ => {
+            if local == remote {
+                VersionRelation::Same
+            } else {
+                VersionRelation::Behind
+            }
+        }
+    }
+}
+
 /// Compile-time platform label that matches the artefact naming in
 /// `.github/workflows/release.yml` (cli matrix). Returns `None` on
 /// targets we don't ship binaries for.
@@ -335,7 +373,13 @@ fn self_update_run(args: SelfUpdateArgs) -> Result<()> {
     let target = self_update_target_label().ok_or_else(|| {
         anyhow!("self-update has no prebuilt artefact for this target; build from source")
     })?;
+    let current = env!("CARGO_PKG_VERSION");
     let bin_path = format!("{target}/bin/sidevers");
+
+    eprintln!(
+        "sidevers self-update · target={target} · current=v{current} · \
+         repo={SELF_UPDATE_REPO_OWNER}/{SELF_UPDATE_REPO_NAME}"
+    );
 
     let mut builder = self_update::backends::github::Update::configure();
     builder
@@ -343,8 +387,12 @@ fn self_update_run(args: SelfUpdateArgs) -> Result<()> {
         .repo_name(SELF_UPDATE_REPO_NAME)
         .bin_name("sidevers")
         .bin_path_in_archive(&bin_path)
+        // Limits asset matching to files whose name contains
+        // "sidevers-cli" — disambiguates from the desktop bundles
+        // (.dmg, .AppImage, .msi) that share the same release.
+        .identifier("sidevers-cli")
         .target(target)
-        .current_version(env!("CARGO_PKG_VERSION"))
+        .current_version(current)
         .show_download_progress(true)
         .no_confirm(args.yes);
     if let Some(v) = &args.version {
@@ -353,19 +401,36 @@ fn self_update_run(args: SelfUpdateArgs) -> Result<()> {
     let update = builder.build()?;
 
     let latest = update.get_latest_release()?;
-    let current = env!("CARGO_PKG_VERSION");
+    let relation = self_update_compare(current, &latest.version);
+
     if args.check {
-        if latest.version == current {
-            println!("up-to-date · running v{current}");
-        } else {
-            println!("update available · v{current} → v{}", latest.version);
+        match relation {
+            VersionRelation::Same => println!("up-to-date · running v{current}"),
+            VersionRelation::Ahead => println!(
+                "ahead of latest · running v{current} (latest release is v{})",
+                latest.version
+            ),
+            VersionRelation::Behind => {
+                println!("update available · v{current} → v{}", latest.version);
+            }
         }
         return Ok(());
     }
 
-    if latest.version == current && args.version.is_none() {
-        println!("already on v{current}; nothing to do");
-        return Ok(());
+    match relation {
+        VersionRelation::Same if args.version.is_none() => {
+            println!("already on v{current}; nothing to do");
+            return Ok(());
+        }
+        VersionRelation::Ahead if args.version.is_none() => {
+            println!(
+                "running v{current}, latest release is v{} — refusing to downgrade. \
+                 Pass --version v{} to override.",
+                latest.version, latest.version
+            );
+            return Ok(());
+        }
+        _ => {}
     }
 
     let status = update.update().context("self-update failed")?;
@@ -871,4 +936,90 @@ fn parse_message_type(s: &str) -> std::result::Result<u8, String> {
         s.parse::<u8>()
     };
     parsed.map_err(|e| format!("expected message type as 0xNN or NN, got {s}: {e}"))
+}
+
+#[cfg(test)]
+mod self_update_tests {
+    use super::*;
+
+    #[test]
+    fn target_label_returns_a_known_label_on_supported_targets() {
+        // We can only assert the label is in the expected set; the
+        // exact value depends on the target the test binary is built
+        // for, and we test across all four in CI.
+        let label = self_update_target_label();
+        if let Some(l) = label {
+            assert!(
+                matches!(
+                    l,
+                    "macos-universal" | "linux-x64" | "linux-arm64" | "windows-x64"
+                ),
+                "unexpected target label: {l}"
+            );
+        }
+    }
+
+    #[test]
+    fn version_compare_handles_v_prefixed_and_bare_strings() {
+        assert_eq!(self_update_compare("0.1.3", "0.1.3"), VersionRelation::Same);
+        assert_eq!(
+            self_update_compare("v0.1.3", "0.1.3"),
+            VersionRelation::Same
+        );
+        assert_eq!(
+            self_update_compare("0.1.3", "v0.1.3"),
+            VersionRelation::Same
+        );
+    }
+
+    #[test]
+    fn version_compare_marks_local_ahead_when_running_a_newer_build() {
+        assert_eq!(
+            self_update_compare("0.1.3", "0.1.0"),
+            VersionRelation::Ahead,
+            "local v0.1.3 should be marked Ahead of published v0.1.0",
+        );
+        assert_eq!(
+            self_update_compare("1.0.0", "0.9.9"),
+            VersionRelation::Ahead
+        );
+    }
+
+    #[test]
+    fn version_compare_marks_local_behind_when_release_is_newer() {
+        assert_eq!(
+            self_update_compare("0.1.0", "0.1.1"),
+            VersionRelation::Behind
+        );
+        assert_eq!(
+            self_update_compare("0.9.9", "1.0.0"),
+            VersionRelation::Behind
+        );
+    }
+
+    #[test]
+    fn version_compare_falls_back_to_string_equality_on_unparseable_input() {
+        // "latest" isn't semver — falls back to string comparison.
+        assert_eq!(
+            self_update_compare("latest", "latest"),
+            VersionRelation::Same
+        );
+        assert_eq!(
+            self_update_compare("garbage", "0.1.0"),
+            VersionRelation::Behind
+        );
+    }
+
+    #[test]
+    fn version_compare_handles_prerelease_tags() {
+        // 0.1.1-rc1 < 0.1.1 final per semver rules.
+        assert_eq!(
+            self_update_compare("0.1.1-rc1", "0.1.1"),
+            VersionRelation::Behind
+        );
+        assert_eq!(
+            self_update_compare("0.1.1", "0.1.1-rc1"),
+            VersionRelation::Ahead
+        );
+    }
 }

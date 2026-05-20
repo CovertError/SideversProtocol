@@ -5,6 +5,28 @@ audit lives at the plan file used to drive this work (P-tier
 prioritization); this changelog records what shipped, what's deferred,
 and where to look in the code.
 
+## Phase 3 Stage F — anonymous adoption telemetry (May 2026)
+
+Added three fire-and-forget HTTP events (`app_started`, `side_created`,
+`verse_created`) to `crates/sidevers-net/src/telemetry.rs`. The wire
+payload is exactly `{event, version, channel}` — no install ID, no
+side/verse address, no peer pubkey, no locale, no timezone, no
+identifying headers. Country is derived server-side from the transport
+IP and the IP discarded; the server retains only `{event, version,
+channel, country, day_bucket}` per request. There is no opt-out and no
+runtime toggle — by design, there is nothing identifying to opt out of.
+
+The implementation is hand-rolled HTTP/1.1 over `tokio::net::TcpStream`
+(zero new dependencies, matching the `metrics.rs` pattern), gated by
+`cfg!(debug_assertions)` so debug builds and `cargo test` never send a
+packet. A unit test (`telemetry::tests::wire_format_contains_exactly_three_fields`)
+snapshots the on-wire bytes and fails the build if any new field,
+header, or identifier creeps in.
+
+Full data policy: [TELEMETRY.md](TELEMETRY.md).
+- Added: [crates/sidevers-net/src/telemetry.rs](crates/sidevers-net/src/telemetry.rs), [TELEMETRY.md](TELEMETRY.md).
+- Wired: `Node::start`, `Node::host_verse` ([crates/sidevers-net/src/node.rs](crates/sidevers-net/src/node.rs)), `Side::load_or_create` ([crates/sidevers-net/src/side.rs](crates/sidevers-net/src/side.rs)), Tauri `.setup` ([desktop/tauri/src/main.rs](desktop/tauri/src/main.rs)).
+
 ## Phase 1.5i — round-2 fresh-eyes audit (May 2026)
 
 A second adversarial pass over the entire codebase, including the

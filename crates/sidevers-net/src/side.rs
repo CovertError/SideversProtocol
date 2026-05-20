@@ -168,6 +168,8 @@ impl Side {
                     is_self_retired: false,
                 };
                 store.upsert_side(&stored).await?;
+                // Anonymous adoption telemetry — see TELEMETRY.md.
+                crate::telemetry::fire("side_created");
                 Ok(Side {
                     address,
                     label,

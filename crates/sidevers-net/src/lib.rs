@@ -31,6 +31,7 @@ pub mod session;
 pub mod side;
 pub mod side_store;
 pub mod storage_protocol;
+pub mod telemetry;
 pub mod transport;
 pub mod verse;
 pub mod verse_post_store;
