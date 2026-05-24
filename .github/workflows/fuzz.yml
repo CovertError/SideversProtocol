@@ -53,7 +53,14 @@ jobs:
           workspaces: "fuzz -> target"
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        # Use pre-built binary instead of `cargo install cargo-fuzz`.
+        # The from-source path drags in rustix 0.36.5, which uses
+        # `#[rustc_layout_scalar_valid_range_*]` attributes that
+        # current rustc rejects ("attributes starting with `rustc`
+        # are reserved"), breaking the install step entirely.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
 
       - name: Enumerate fuzz targets
         id: targets
