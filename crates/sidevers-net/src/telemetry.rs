@@ -152,9 +152,7 @@ impl ParsedEndpoint {
 }
 
 async fn ship_one(ep: &ParsedEndpoint, event: &'static str) -> std::io::Result<()> {
-    let body = format!(
-        r#"{{"event":"{event}","version":"{VERSION}","channel":"{CHANNEL}"}}"#
-    );
+    let body = format!(r#"{{"event":"{event}","version":"{VERSION}","channel":"{CHANNEL}"}}"#);
     let request = format!(
         "POST {path} HTTP/1.1\r\n\
          Host: {host}\r\n\
